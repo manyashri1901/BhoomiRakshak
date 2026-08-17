@@ -1,0 +1,128 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  LANDOWNER
+  VILLAGE_OFFICER
+  REGISTRAR
+}
+
+enum LandRecordStatus {
+  ACTIVE
+  PENDING
+  DISPUTED
+  TRANSFERRED
+}
+
+enum TransactionType {
+  REGISTRATION
+  TRANSFER
+  UPDATE
+}
+
+enum TransactionStatus {
+  PENDING_VO
+  PENDING_REGISTRAR
+  APPROVED
+  REJECTED
+}
+
+enum AreaUnit {
+  HECTARE
+  ACRE
+}
+
+model User {
+  id            String   @id @default(cuid())
+  name          String
+  email         String   @unique
+  passwordHash  String
+  role          Role
+  publicKey     String   @db.Text
+  privateKeyRef String   @db.Text
+  createdAt     DateTime @default(now())
+
+  certificate        Certificate?
+  ownedLandRecords    LandRecord[]
+  transactionsFrom    Transaction[] @relation("TransactionFromOwner")
+  transactionsTo      Transaction[] @relation("TransactionToOwner")
+  signatures          Signature[]
+
+  @@map("users")
+}
+
+model Certificate {
+  id            String   @id @default(cuid())
+  subjectUserId String   @unique
+  subject       User     @relation(fields: [subjectUserId], references: [id], onDelete: Restrict)
+  role          Role
+  publicKey     String   @db.Text
+  issuer        String   @default("BhoomiRakshak Root CA")
+  issuedAt      DateTime @default(now())
+  signature     String   @db.Text
+  fingerprint   String
+
+  @@map("certificates")
+}
+
+model LandRecord {
+  id             String           @id @default(cuid())
+  surveyNumber   String           @unique
+  location       String
+  // area is denominated in whatever areaUnit says — not a fixed hidden
+  // unit. Always read/display them together; never interpret `area` alone.
+  area           Float
+  areaUnit       AreaUnit         @default(HECTARE)
+  currentOwnerId String
+  currentOwner   User             @relation(fields: [currentOwnerId], references: [id], onDelete: Restrict)
+  status         LandRecordStatus @default(ACTIVE)
+  createdAt      DateTime         @default(now())
+
+  transactions Transaction[]
+
+  @@map("land_records")
+}
+
+model Transaction {
+  id           String             @id @default(cuid())
+  type         TransactionType
+  landRecordId String
+  landRecord   LandRecord         @relation(fields: [landRecordId], references: [id], onDelete: Restrict)
+  fromOwnerId  String?
+  fromOwner    User?              @relation("TransactionFromOwner", fields: [fromOwnerId], references: [id], onDelete: Restrict)
+  toOwnerId    String
+  toOwner      User               @relation("TransactionToOwner", fields: [toOwnerId], references: [id], onDelete: Restrict)
+  documentPath String
+  documentHash String
+  status       TransactionStatus  @default(PENDING_VO)
+  rejectReason String?
+  createdAt    DateTime           @default(now())
+
+  signatures Signature[]
+
+  @@map("transactions")
+}
+
+model Signature {
+  id             String      @id @default(cuid())
+  transactionId  String
+  transaction    Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  actorId        String
+  actor          User        @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  role           Role
+  signedAt       DateTime    @default(now())
+  signatureValue String      @db.Text
+  dataHash       String      @db.Text
+  valid          Boolean     @default(true)
+
+  @@map("signatures")
+}
