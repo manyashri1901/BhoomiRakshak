@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import axios from "axios";
 import { getCRL, getCertificateByUserId, revokeCertificate } from "../api/certificates";
+import {
+  verifyAuditChain,
+  getAuditEntryCount,
+  getAuditHead,
+  type AuditVerificationResult,
+  type AuditChainHead,
+} from "../api/audit";
 import { Card } from "../components/Card";
 import { ErrorState, LoadingState, EmptyState } from "../components/States";
 import { UserPicker } from "../components/UserPicker";
@@ -22,6 +29,12 @@ export function AdminDashboard() {
   const [formError, setFormError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
+  const [auditResult, setAuditResult] = useState<AuditVerificationResult | null>(null);
+  const [auditEntryCount, setAuditEntryCount] = useState<number | null>(null);
+  const [auditHead, setAuditHead] = useState<AuditChainHead | null>(null);
+  const [auditChecking, setAuditChecking] = useState(false);
+  const [auditError, setAuditError] = useState<string | null>(null);
+
   const loadCrl = useCallback(() => {
     getCRL()
       .then(setCrl)
@@ -35,6 +48,29 @@ export function AdminDashboard() {
   useEffect(() => {
     loadCrl();
   }, [loadCrl]);
+
+  async function handleVerifyIntegrity() {
+    setAuditChecking(true);
+    setAuditError(null);
+    try {
+      const [result, count, head] = await Promise.all([
+        verifyAuditChain(),
+        getAuditEntryCount(),
+        getAuditHead(),
+      ]);
+      setAuditResult(result);
+      setAuditEntryCount(count);
+      setAuditHead(head);
+    } catch (err) {
+      setAuditError(
+        axios.isAxiosError(err)
+          ? (err.response?.data?.error ?? "Failed to verify audit chain")
+          : "Failed to verify audit chain",
+      );
+    } finally {
+      setAuditChecking(false);
+    }
+  }
 
   async function handleRevoke(event: FormEvent) {
     event.preventDefault();
@@ -150,6 +186,46 @@ export function AdminDashboard() {
             </table>
           )}
         </div>
+      </Card>
+
+      <Card>
+        <h2 className="font-serif text-lg font-semibold text-ink">Verify audit chain integrity</h2>
+        <p className="mt-1 text-sm text-muted">
+          Recomputes every audit log entry's hash and checks its link to the previous entry — a
+          tamper anywhere in the chain (edited or deleted row) is reported as the first broken
+          sequence number, not just "something's wrong."
+        </p>
+
+        <button
+          type="button"
+          onClick={handleVerifyIntegrity}
+          disabled={auditChecking}
+          className="mt-4 self-start rounded-md bg-coffee px-4 py-2 text-sm font-semibold text-apricot hover:bg-coffee-hover disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {auditChecking ? "Verifying…" : "Verify integrity"}
+        </button>
+
+        {auditError && <ErrorState label={auditError} />}
+
+        {auditResult && (
+          <div className="mt-4 flex flex-col gap-2 text-sm">
+            <p className={auditResult.valid ? "text-dark-cocoa" : "text-wax-seal"}>
+              <span className="font-semibold">{auditResult.valid ? "Chain intact." : "Chain broken."}</span>{" "}
+              {auditResult.valid
+                ? `All ${auditResult.checked} entries verified.`
+                : `${auditResult.checked} entries verified before the break at seq ${auditResult.firstBrokenSeq}: ${auditResult.reason}`}
+            </p>
+            {auditEntryCount !== null && (
+              <p className="text-muted">Total entries in the log: {auditEntryCount}</p>
+            )}
+            {auditHead?.hash && (
+              <p className="break-all text-muted">
+                Head: seq {auditHead.seq} —{" "}
+                <span className="font-mono text-xs">{auditHead.hash}</span>
+              </p>
+            )}
+          </div>
+        )}
       </Card>
     </div>
   );
