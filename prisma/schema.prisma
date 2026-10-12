@@ -58,6 +58,7 @@ model User {
   transactionsTo      Transaction[] @relation("TransactionToOwner")
   signatures          Signature[]
   revokedCertificates Certificate[] @relation("CertificateRevokedBy")
+  auditLogs           AuditLog[]
 
   @@map("users")
 }
@@ -133,4 +134,35 @@ model Signature {
   valid          Boolean     @default(true)
 
   @@map("signatures")
+}
+
+// System-wide tamper-evident audit trail — separate from the Signature
+// chain (which only covers land-record transactions). Every entry's hash
+// commits to the previous entry's hash (hash = H(seq, action, actorUserId,
+// entityType, entityId, details, nonce, timestamp, prevHash)), so altering
+// or deleting any row, or inserting one out of order, breaks every hash
+// from that point forward — verifyAuditChain() (lib/audit.ts) recomputes
+// and checks this on demand, never trusting a cached flag.
+model AuditLog {
+  id            String   @id @default(cuid())
+  seq           Int      @unique
+  action        String
+  actorUserId   String?
+  actor         User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  entityType    String
+  entityId      String?
+  // Free-form context for the action (e.g. {decision: "APPROVE"}) — never a
+  // password or private key. Always a JSON object, never SQL null, so
+  // canonicalStringify() and crypto.createHash() have the same well-defined
+  // shape to hash on every read.
+  details       Json
+  // 16 random bytes, hex-encoded — included in the hash so two entries with
+  // otherwise-identical fields (e.g. two LOGIN_FAILURE rows in the same
+  // millisecond) can never collide or be replayed as "the same" event.
+  nonce         String
+  timestamp     DateTime @default(now())
+  prevHash      String
+  hash          String
+
+  @@map("audit_logs")
 }
