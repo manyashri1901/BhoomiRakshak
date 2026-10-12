@@ -2,13 +2,16 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
 import { listLandRecords, getLandRecordHistory } from "../api/landRecords";
-import { createTransaction } from "../api/transactions";
+import { prepareCreateTransaction, submitCreateTransaction } from "../api/transactions";
 import { uploadDocument } from "../api/documents";
+import { signAndSubmit } from "../lib/signAndSubmit";
+import { useAuth } from "../context/AuthContext";
 import { formatAreaWithConversion } from "../lib/areaUnits";
 import { Card } from "../components/Card";
 import { LandRecordStatusBadge, TransactionStatusBadge } from "../components/StatusBadge";
 import { EmptyState, ErrorState, LoadingState } from "../components/States";
 import { UserPicker } from "../components/UserPicker";
+import { PasswordPrompt } from "../components/PasswordPrompt";
 import type { HistoryTransaction, LandRecordListItem, TransactionType, UserSummary } from "../types";
 
 interface OwnedTransaction extends HistoryTransaction {
@@ -18,6 +21,7 @@ interface OwnedTransaction extends HistoryTransaction {
 const TYPES: TransactionType[] = ["REGISTRATION", "TRANSFER", "UPDATE"];
 
 export function LandownerDashboard() {
+  const { wrappedKey } = useAuth();
   const [records, setRecords] = useState<LandRecordListItem[] | null>(null);
   const [transactions, setTransactions] = useState<OwnedTransaction[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -29,6 +33,18 @@ export function LandownerDashboard() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  // Set once the document is uploaded and the form is otherwise valid —
+  // opening the password prompt is what actually triggers prepare -> sign
+  // -> submit (lib/signAndSubmit.ts) against this input.
+  const [pendingInput, setPendingInput] = useState<{
+    type: TransactionType;
+    landRecordId: string;
+    toOwnerId?: string;
+    documentPath: string;
+    documentHash: string;
+  } | null>(null);
+  const [signingOpen, setSigningOpen] = useState(false);
 
   // Guards the second wave of requests below (per-record history fetches)
   // from firing after this component has unmounted — e.g. the user logs
@@ -89,28 +105,44 @@ export function LandownerDashboard() {
     setSubmitting(true);
     try {
       const upload = await uploadDocument(file);
-      await createTransaction({
+      setPendingInput({
         type,
         landRecordId,
         toOwnerId: type === "TRANSFER" ? toOwner!.id : undefined,
         documentPath: upload.documentPath,
         documentHash: upload.documentHash,
       });
-      setSuccessMessage("Transaction created and sent for Village Officer review.");
-      setLandRecordId("");
-      setType("REGISTRATION");
-      setToOwner(null);
-      setFile(null);
-      await loadData();
+      setSigningOpen(true);
     } catch (err) {
       setFormError(
         axios.isAxiosError(err)
-          ? (err.response?.data?.error ?? "Failed to create transaction")
-          : "Failed to create transaction",
+          ? (err.response?.data?.error ?? "Failed to upload document")
+          : "Failed to upload document",
       );
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function handleSignAndSubmit(password: string) {
+    if (!pendingInput) return;
+    if (!wrappedKey) {
+      throw new Error("No signing key on this account — log out and back in, or re-register.");
+    }
+    await signAndSubmit(
+      wrappedKey,
+      password,
+      () => prepareCreateTransaction(pendingInput),
+      (nonce, signatureValue) => submitCreateTransaction(nonce, signatureValue),
+    );
+    setSigningOpen(false);
+    setSuccessMessage("Transaction created and sent for Village Officer review.");
+    setLandRecordId("");
+    setType("REGISTRATION");
+    setToOwner(null);
+    setFile(null);
+    setPendingInput(null);
+    await loadData();
   }
 
   return (
@@ -229,7 +261,7 @@ export function LandownerDashboard() {
               disabled={submitting}
               className="self-start rounded-md bg-coffee px-4 py-2 text-sm font-semibold text-apricot hover:bg-coffee-hover disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {submitting ? "Submitting…" : "Create Transaction"}
+              {submitting ? "Uploading…" : "Continue to Sign"}
             </button>
           </form>
         </Card>
@@ -259,6 +291,15 @@ export function LandownerDashboard() {
           </div>
         )}
       </div>
+
+      <PasswordPrompt
+        open={signingOpen}
+        title="Sign transaction"
+        description="Enter your password to unlock your signing key and submit this transaction."
+        confirmLabel="Sign & Submit"
+        onConfirm={handleSignAndSubmit}
+        onCancel={() => setSigningOpen(false)}
+      />
     </div>
   );
 }

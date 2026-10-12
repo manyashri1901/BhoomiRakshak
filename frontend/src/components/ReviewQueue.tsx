@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
-import { verifyTransaction, type ReviewResult, isAutoReject } from "../api/transactions";
+import { verifyTransaction, isAutoReject, type ReviewResult, type PreparedSignature } from "../api/transactions";
 import { downloadDocument } from "../api/documents";
+import { signAndSubmit } from "../lib/signAndSubmit";
+import { useAuth } from "../context/AuthContext";
 import { Card } from "./Card";
 import { ValidBadge } from "./ValidBadge";
+import { PasswordPrompt } from "./PasswordPrompt";
 import { EmptyState, ErrorState, LoadingState } from "./States";
 import { ROLE_LABELS } from "../lib/roleHome";
 import type { TransactionVerifyResult, TransactionWithChain } from "../types";
@@ -14,7 +17,8 @@ interface ReviewQueueProps {
   transactions: TransactionWithChain[] | null;
   loadError: string | null;
   emptyLabel: string;
-  onApprove: (id: string) => Promise<ReviewResult>;
+  prepareApprove: (id: string) => Promise<PreparedSignature>;
+  submitApprove: (id: string, nonce: string, signatureValue: string) => Promise<ReviewResult>;
   onReject: (id: string, reason: string) => Promise<ReviewResult>;
   onDecided: () => void;
 }
@@ -29,14 +33,17 @@ export function ReviewQueue({
   transactions,
   loadError,
   emptyLabel,
-  onApprove,
+  prepareApprove,
+  submitApprove,
   onReject,
   onDecided,
 }: ReviewQueueProps) {
+  const { wrappedKey } = useAuth();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [liveCheck, setLiveCheck] = useState<TransactionVerifyResult | null>(null);
   const [checking, setChecking] = useState(false);
   const [rejecting, setRejecting] = useState(false);
+  const [signingOpen, setSigningOpen] = useState(false);
   const [reason, setReason] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -72,26 +79,29 @@ export function ReviewQueue({
     setActionMessage(null);
   }
 
-  async function handleApprove() {
-    if (!selectedId) return;
-    setBusy(true);
-    setActionError(null);
-    try {
-      const result = await onApprove(selectedId);
-      if (isAutoReject(result)) {
-        setActionMessage(`Auto-rejected: ${result.reason}`);
-      } else {
-        setActionMessage("Approved and signed.");
-      }
-      setSelectedId(null);
-      onDecided();
-    } catch (err) {
-      setActionError(
-        axios.isAxiosError(err) ? (err.response?.data?.error ?? "Review failed") : "Review failed",
-      );
-    } finally {
-      setBusy(false);
+  function handleResult(result: ReviewResult) {
+    if (isAutoReject(result)) {
+      setActionMessage(`Auto-rejected: ${result.reason}`);
+    } else {
+      setActionMessage("Approved and signed.");
     }
+    setSelectedId(null);
+    onDecided();
+  }
+
+  async function handleApproveWithPassword(password: string) {
+    if (!selectedId) return;
+    if (!wrappedKey) {
+      throw new Error("No signing key on this account — log out and back in, or re-register.");
+    }
+    const result = await signAndSubmit(
+      wrappedKey,
+      password,
+      () => prepareApprove(selectedId),
+      (nonce, signatureValue) => submitApprove(selectedId, nonce, signatureValue),
+    );
+    setSigningOpen(false);
+    handleResult(result);
   }
 
   async function handleReject() {
@@ -103,10 +113,8 @@ export function ReviewQueue({
     setBusy(true);
     setActionError(null);
     try {
-      await onReject(selectedId, reason.trim());
-      setActionMessage("Rejected.");
-      setSelectedId(null);
-      onDecided();
+      const result = await onReject(selectedId, reason.trim());
+      handleResult(result);
     } catch (err) {
       setActionError(
         axios.isAxiosError(err) ? (err.response?.data?.error ?? "Review failed") : "Review failed",
@@ -214,11 +222,11 @@ export function ReviewQueue({
                     <div className="flex gap-3">
                       <button
                         type="button"
-                        onClick={handleApprove}
+                        onClick={() => setSigningOpen(true)}
                         disabled={busy}
                         className="rounded-md bg-coffee px-4 py-2 text-sm font-semibold text-apricot hover:bg-coffee-hover disabled:cursor-not-allowed disabled:opacity-60"
                       >
-                        {busy ? "Working…" : "Approve"}
+                        Approve
                       </button>
                       <button
                         type="button"
@@ -266,6 +274,15 @@ export function ReviewQueue({
           </div>
         </div>
       )}
+
+      <PasswordPrompt
+        open={signingOpen}
+        title="Sign approval"
+        description="Enter your password to unlock your signing key and approve this transaction."
+        confirmLabel="Approve & Sign"
+        onConfirm={handleApproveWithPassword}
+        onCancel={() => setSigningOpen(false)}
+      />
     </div>
   );
 }

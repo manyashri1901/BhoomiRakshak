@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import axios from "axios";
-import { listPendingVo, reviewAsVo } from "../api/transactions";
+import { listPendingVo, prepareVoReview, submitVoReview, rejectVoReview } from "../api/transactions";
 import { ReviewQueue } from "../components/ReviewQueue";
 import type { TransactionWithChain } from "../types";
 
@@ -40,8 +40,9 @@ export function VillageOfficerDashboard() {
         transactions={transactions}
         loadError={loadError}
         emptyLabel="No pending transactions."
-        onApprove={(id) => reviewAsVo(id, "APPROVE")}
-        onReject={(id, reason) => reviewAsVo(id, "REJECT", reason)}
+        prepareApprove={prepareVoReview}
+        submitApprove={submitVoReview}
+        onReject={rejectVoReview}
         onDecided={load}
       />
     </div>

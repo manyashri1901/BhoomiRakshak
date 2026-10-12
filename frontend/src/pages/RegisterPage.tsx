@@ -41,7 +41,10 @@ export function RegisterPage() {
       <div className="rounded-lg border border-border-subtle bg-surface px-8 py-10 shadow-sm">
         <h1 className="font-serif text-2xl font-semibold text-ink">Create an account</h1>
         <p className="mt-1 text-sm text-muted">
-          Registration issues you an RSA key pair and a CA-signed certificate.
+          Registration generates your signing key pair in this browser and issues a CA-signed
+          certificate — your private key is encrypted with your password and never leaves your
+          device unencrypted. There is no password reset: if you forget it, your key is
+          unrecoverable and an admin must revoke and reissue your certificate.
         </p>
 
         <form onSubmit={handleSubmit} className="mt-6 flex flex-col gap-4">

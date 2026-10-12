@@ -33,7 +33,7 @@ export interface UserSummary {
 }
 
 // The actor embedded in a signature is deliberately narrowed server-side —
-// never passwordHash/privateKeyRef, only what verification/display need.
+// never passwordHash or wrapped key material, only what verification/display need.
 export interface ActorSummary {
   id: string;
   name: string;

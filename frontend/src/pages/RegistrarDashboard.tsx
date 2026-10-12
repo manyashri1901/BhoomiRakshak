@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import axios from "axios";
 import { createLandRecord } from "../api/landRecords";
-import { listPendingRegistrar, reviewAsRegistrar } from "../api/transactions";
+import {
+  listPendingRegistrar,
+  prepareRegistrarReview,
+  submitRegistrarReview,
+  rejectRegistrarReview,
+} from "../api/transactions";
 import { Card } from "../components/Card";
 import { ErrorState } from "../components/States";
 import { ReviewQueue } from "../components/ReviewQueue";
@@ -171,8 +176,9 @@ export function RegistrarDashboard() {
         transactions={transactions}
         loadError={loadError}
         emptyLabel="No pending transactions."
-        onApprove={(id) => reviewAsRegistrar(id, "APPROVE")}
-        onReject={(id, reason) => reviewAsRegistrar(id, "REJECT", reason)}
+        prepareApprove={prepareRegistrarReview}
+        submitApprove={submitRegistrarReview}
+        onReject={rejectRegistrarReview}
         onDecided={load}
       />
     </div>
