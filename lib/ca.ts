@@ -323,9 +323,9 @@ export async function verifyCertificate(
 
   // (a) Fetch certificate + subject. select, not include: true — only the
   // subject's name is ever used below; the full User row carries
-  // passwordHash and the raw RSA privateKeyRef, neither of which this
-  // function (or its callers, some of which return its result to clients)
-  // should ever pull into memory.
+  // passwordHash and wrapped key material, neither of which this function
+  // (or its callers, some of which return its result to clients) should
+  // ever pull into memory.
   const cert = await prisma.certificate.findUnique({
     where: { id: certificateId },
     include: { subject: { select: { name: true } } },
@@ -509,77 +509,102 @@ export async function getCRL(): Promise<RevokedCertificateSummary[]> {
 }
 
 // ---------------------------------------------------------------------------
-// 4. USER KEY PAIR GENERATION (registration flow)
+// 4. ADMIN BOOTSTRAP KEY PAIR GENERATION
 // ---------------------------------------------------------------------------
 
 /**
- * Generates a fresh RSA-2048 key pair for a newly registering user
- * (Landowner / Village Officer / Registrar). Called once at registration,
- * before issueCertificate() binds the resulting public key to the user's
- * identity. The private key is the user's own — BhoomiRakshak never signs
- * on their behalf; only the CA's own key pair (see ensureRootCA) is
- * held server-side for issuing certificates.
+ * Generates a fresh RSA-2048 key pair. ONLY used by scripts/create-first-admin.ts
+ * (and scripts/test-ca.ts for demonstration) — every normal user
+ * (Landowner / Village Officer / Registrar) generates their own key pair
+ * in the browser instead (frontend/src/lib/clientCrypto.ts) and never
+ * sends the private key to the server at all; see
+ * verifyRegistrationProof() below. An ADMIN account never signs anything,
+ * so its private key is generated once for certificate issuance and then
+ * discarded — nothing wraps or stores it, since there's nothing to use it
+ * for afterwards.
  */
 export function generateUserKeyPair(): KeyPairPem {
   return generateRsaKeyPair();
 }
 
 // ---------------------------------------------------------------------------
-// 5. PROOF OF POSSESSION
+// 5. REGISTRATION PROOF OF POSSESSION (client-side keys)
 // ---------------------------------------------------------------------------
 //
 // issueCertificate() trusts whatever public key it is handed. Without this
 // check, nothing stops a registration request from submitting a public key
-// it doesn't actually control the matching private key for (e.g. someone
-// else's public key, or a corrupted keypair) — the CA would then issue a
-// certificate binding an identity to a key the registrant can never sign
-// with, or worse, to a key someone else controls. Proof of possession
-// closes that gap: the server generates a random nonce, has the *private*
-// key sign it, and immediately checks that signature with the *public*
-// key. Only someone holding the matching private key can produce a
-// signature the public key accepts.
+// it doesn't actually control the matching private key for — the CA would
+// then issue a certificate binding an identity to a key the registrant can
+// never sign with, or worse, to a key someone else controls.
+//
+// Since the key pair is generated in the browser (frontend/src/lib/
+// clientCrypto.ts), proof of possession can't be a server-issued
+// challenge-response round trip without an extra request — instead the
+// browser itself builds a canonical string of {email, fingerprint,
+// timestamp}, signs it with the private key it just generated (before
+// that key is ever wrapped/discarded), and sends {publicKey, signature,
+// timestamp} in the same registration request. The server re-derives the
+// exact same canonical string from its own view of the request (never
+// trusting a client-supplied payload) and checks:
+//  (a) timestamp is a valid ISO date within ±5 minutes of server time —
+//      bounds how long a captured signature could be replayed as a fresh
+//      registration attempt, without requiring state (a stored nonce) for
+//      something that only ever needs to happen once per registration.
+//  (b) the signature verifies against the submitted public key.
+// Both must hold for the proof to be accepted.
 
-export interface KeyPossessionProof {
-  nonce: string;
-  signature: string;
+const REGISTRATION_PROOF_WINDOW_MS = 5 * 60 * 1000;
+
+export interface RegistrationProofInput {
+  email: string;
+  publicKey: string;
+  timestamp: string; // ISO 8601, as sent by the client
+  signature: string; // base64
 }
 
-/**
- * Signs a fresh random nonce with `privateKey`, proving whoever calls this
- * holds that private key. Called right after generateUserKeyPair() during
- * registration, before the resulting public key is ever handed to
- * issueCertificate().
- */
-export function proveKeyPossession(privateKey: string): KeyPossessionProof {
-  // 32 random bytes, hex-encoded — large enough that guessing/replaying a
-  // previously seen nonce is infeasible, and it's never reused across calls.
-  const nonce = crypto.randomBytes(32).toString("hex");
-  const signature = crypto
-    .sign("RSA-SHA256", Buffer.from(nonce, "utf8"), privateKey)
-    .toString("base64");
-  return { nonce, signature };
+export interface RegistrationProofResult {
+  valid: boolean;
+  reason: string | null;
 }
 
-/**
- * Verifies a proof produced by proveKeyPossession(): does `signature` over
- * `nonce` check out against `publicKey`? Returns false (never throws) on a
- * malformed key or signature so callers can treat it as a plain pass/fail
- * gate on registration.
- */
-export function verifyKeyPossession(
-  publicKey: string,
-  nonce: string,
-  signature: string,
-): boolean {
+export function verifyRegistrationProof(
+  input: RegistrationProofInput,
+): RegistrationProofResult {
+  const timestampMs = Date.parse(input.timestamp);
+  if (Number.isNaN(timestampMs)) {
+    return { valid: false, reason: "timestamp is not a valid ISO 8601 date" };
+  }
+  const skewMs = Math.abs(Date.now() - timestampMs);
+  if (skewMs > REGISTRATION_PROOF_WINDOW_MS) {
+    return { valid: false, reason: "timestamp is outside the 5-minute acceptance window" };
+  }
+
+  let fingerprint: string;
   try {
-    return crypto.verify(
-      "RSA-SHA256",
-      Buffer.from(nonce, "utf8"),
-      publicKey,
-      Buffer.from(signature, "base64"),
-    );
+    fingerprint = crypto.createHash("sha256").update(input.publicKey, "utf8").digest("hex");
   } catch {
-    // Malformed PEM / base64 — treat as failed proof, not a crash.
-    return false;
+    return { valid: false, reason: "publicKey is not a valid PEM key" };
+  }
+
+  const canonical = canonicalStringify({
+    email: input.email,
+    fingerprint,
+    timestamp: input.timestamp,
+  });
+  const canonicalBuffer = Buffer.from(canonical, "utf8");
+
+  try {
+    const signatureValid = crypto.verify(
+      "RSA-SHA256",
+      canonicalBuffer,
+      input.publicKey,
+      Buffer.from(input.signature, "base64"),
+    );
+    if (!signatureValid) {
+      return { valid: false, reason: "signature does not match the submitted public key" };
+    }
+    return { valid: true, reason: null };
+  } catch {
+    return { valid: false, reason: "malformed public key or signature" };
   }
 }

@@ -43,14 +43,31 @@ enum AreaUnit {
 }
 
 model User {
-  id            String   @id @default(cuid())
-  name          String
-  email         String   @unique
-  passwordHash  String
-  role          Role
-  publicKey     String   @db.Text
-  privateKeyRef String   @db.Text
-  createdAt     DateTime @default(now())
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role
+  // The user's own RSA-2048 public key (SPKI PEM), generated in the
+  // browser at registration — see frontend/src/lib/clientCrypto.ts. The
+  // matching private key is never sent to or stored on the server in
+  // usable form; only an AES-256-GCM-wrapped copy (below), encryptable
+  // only by someone who knows the user's password, which the server never
+  // has either.
+  publicKey String @db.Text
+
+  // Wrapped private key material — null for ADMIN (admin never signs
+  // anything, so there is nothing to wrap) and for any account that
+  // predates this column. All three are base64; wrappedPrivateKey is the
+  // AES-256-GCM ciphertext of the PKCS#8 private key, wrapSalt is the
+  // PBKDF2 salt, wrapIv is the AES-GCM IV. The server can store and return
+  // this blob but has no way to decrypt it — only the browser, given the
+  // user's password, can unwrap it (see frontend/src/lib/clientCrypto.ts).
+  wrappedPrivateKey String? @db.Text
+  wrapSalt          String?
+  wrapIv            String?
+
+  createdAt DateTime @default(now())
 
   certificate         Certificate?
   ownedLandRecords    LandRecord[]
@@ -59,6 +76,7 @@ model User {
   signatures          Signature[]
   revokedCertificates Certificate[] @relation("CertificateRevokedBy")
   auditLogs           AuditLog[]
+  signingNonces       SigningNonce[]
 
   @@map("users")
 }
@@ -134,6 +152,36 @@ model Signature {
   valid          Boolean     @default(true)
 
   @@map("signatures")
+}
+
+// Backs the prepare -> sign -> submit flow (routes/transactions.ts): a
+// prepare call freezes the exact canonical payload the server will later
+// insist on (so a submit can never substitute a different payload for the
+// one that was actually signed) and binds it to a single-use, short-lived
+// nonce. The server never trusts a client-echoed payload at submit time —
+// only this frozen copy, looked up by nonce.
+model SigningNonce {
+  id            String    @id @default(cuid())
+  nonce         String    @unique
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  // "TRANSACTION_CREATE" | "VO_REVIEW_APPROVE" | "REGISTRAR_REVIEW_APPROVE"
+  purpose       String
+  // Null for TRANSACTION_CREATE (the transaction doesn't exist yet at
+  // prepare time); set for the two review purposes so submit can confirm
+  // this nonce was actually issued for the transaction it's being used on.
+  transactionId String?
+  // The exact canonical string the browser must sign byte-for-byte —
+  // submit verifies the signature against THIS, never against anything
+  // the client sends.
+  payload       String    @db.Text
+  payloadHash   String
+  used          Boolean   @default(false)
+  usedAt        DateTime?
+  expiresAt     DateTime
+  createdAt     DateTime  @default(now())
+
+  @@map("signing_nonces")
 }
 
 // System-wide tamper-evident audit trail — separate from the Signature
