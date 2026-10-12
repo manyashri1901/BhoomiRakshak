@@ -22,7 +22,6 @@ async function main() {
       passwordHash: "not-a-real-hash",
       role: "LANDOWNER",
       publicKey: "placeholder-until-keypair-generated",
-      privateKeyRef: "placeholder-until-keypair-generated",
     },
   });
   console.log("1. Created test user:", testUser.id);

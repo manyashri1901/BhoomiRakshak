@@ -16,7 +16,7 @@
 import "dotenv/config";
 import bcrypt from "bcrypt";
 import { prisma } from "../lib/prisma.ts";
-import { generateUserKeyPair, proveKeyPossession, verifyKeyPossession, issueCertificate } from "../lib/ca.ts";
+import { generateUserKeyPair, issueCertificate } from "../lib/ca.ts";
 
 const BCRYPT_SALT_ROUNDS = 10;
 
@@ -50,13 +50,13 @@ async function main() {
   }
 
   const passwordHash = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
-  const { publicKey, privateKey } = generateUserKeyPair();
-
-  const proof = proveKeyPossession(privateKey);
-  if (!verifyKeyPossession(publicKey, proof.nonce, proof.signature)) {
-    console.error("Key possession check failed; aborting.");
-    process.exit(1);
-  }
+  // An ADMIN account never signs anything — only LANDOWNER/VILLAGE_OFFICER/
+  // REGISTRAR accounts generate a key pair in the browser and sign
+  // transactions with it. generateUserKeyPair() here is purely so this
+  // account has *a* public key to bind a certificate to; the private key
+  // is discarded immediately rather than stored, wrapped or not — there's
+  // nothing for it to ever sign.
+  const { publicKey } = generateUserKeyPair();
 
   const admin = await prisma.user.create({
     data: {
@@ -65,7 +65,6 @@ async function main() {
       passwordHash,
       role: "ADMIN",
       publicKey,
-      privateKeyRef: privateKey,
     },
   });
 

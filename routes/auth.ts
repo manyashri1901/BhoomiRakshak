@@ -13,12 +13,7 @@ import jwt from "jsonwebtoken";
 import { prisma } from "../lib/prisma.ts";
 import { requireAuth } from "../middleware/auth.ts";
 import { loginRateLimiter, registerRateLimiter } from "../middleware/rateLimit.ts";
-import {
-  generateUserKeyPair,
-  proveKeyPossession,
-  verifyKeyPossession,
-  issueCertificate,
-} from "../lib/ca.ts";
+import { verifyRegistrationProof, issueCertificate } from "../lib/ca.ts";
 import { appendAuditEntry } from "../lib/audit.ts";
 import type { Role } from "../generated/prisma/enums.ts";
 
@@ -43,7 +38,18 @@ function logAuthEvent(event: "LOGIN_FAILURE" | "LOGIN_SUCCESS", fields: Record<s
 }
 
 router.post("/register", registerRateLimiter, async (req, res) => {
-  const { name, email, password, role } = req.body ?? {};
+  const {
+    name,
+    email,
+    password,
+    role,
+    publicKey,
+    proofTimestamp,
+    proofSignature,
+    wrappedPrivateKey,
+    wrapSalt,
+    wrapIv,
+  } = req.body ?? {};
 
   if (typeof name !== "string" || !name.trim()) {
     res.status(400).json({ error: "name is required" });
@@ -61,40 +67,58 @@ router.post("/register", registerRateLimiter, async (req, res) => {
     res.status(400).json({ error: `role must be one of ${VALID_ROLES.join(", ")}` });
     return;
   }
-
-  const passwordHash = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
-
-  // This user's own RSA keypair (separate from the CA's own keypair in keys/).
-  const { publicKey, privateKey } = generateUserKeyPair();
-
-  // Proof of possession: before this keypair goes anywhere near a
-  // certificate, prove the private key we hold really signs for the
-  // public key we're about to publish. Guards against a corrupted keypair
-  // now, and against a submitted-not-generated public key if this flow is
-  // ever changed to accept client-generated keys.
-  const proof = proveKeyPossession(privateKey);
-  const possessionValid = verifyKeyPossession(publicKey, proof.nonce, proof.signature);
-  if (!possessionValid) {
-    res.status(500).json({ error: "Key possession check failed; registration aborted" });
+  // The key pair is generated in the browser — see
+  // frontend/src/lib/clientCrypto.ts. The server only ever receives the
+  // public key, a proof that the browser holds the matching private key,
+  // and that private key already wrapped (AES-256-GCM, key derived from
+  // the user's password via PBKDF2) so it can never be read back out in
+  // usable form, by this server or anyone with read access to its database.
+  if (typeof publicKey !== "string" || !publicKey.trim()) {
+    res.status(400).json({ error: "publicKey is required" });
     return;
   }
+  if (typeof proofTimestamp !== "string" || typeof proofSignature !== "string") {
+    res.status(400).json({ error: "proofTimestamp and proofSignature are required" });
+    return;
+  }
+  if (
+    typeof wrappedPrivateKey !== "string" ||
+    typeof wrapSalt !== "string" ||
+    typeof wrapIv !== "string" ||
+    !wrappedPrivateKey ||
+    !wrapSalt ||
+    !wrapIv
+  ) {
+    res.status(400).json({ error: "wrappedPrivateKey, wrapSalt, and wrapIv are required" });
+    return;
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+
+  const proof = verifyRegistrationProof({
+    email: normalizedEmail,
+    publicKey,
+    timestamp: proofTimestamp,
+    signature: proofSignature,
+  });
+  if (!proof.valid) {
+    res.status(400).json({ error: `Key possession proof failed: ${proof.reason}` });
+    return;
+  }
+
+  const passwordHash = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
 
   try {
     const user = await prisma.user.create({
       data: {
         name: name.trim(),
-        email: email.trim().toLowerCase(),
+        email: normalizedEmail,
         passwordHash,
         role: role as Role,
         publicKey,
-        // MVP ONLY: the raw private key PEM is stored server-side (in the
-        // field named privateKeyRef) so this demo can sign on the user's
-        // behalf without a client-side keystore. A production system would
-        // never hold a user's private key in plaintext on the server —
-        // it would be generated and kept client-side (browser/mobile
-        // secure storage) or managed by an HSM/KMS, with the server only
-        // ever seeing the public key.
-        privateKeyRef: privateKey,
+        wrappedPrivateKey,
+        wrapSalt,
+        wrapIv,
       },
     });
 
@@ -113,7 +137,10 @@ router.post("/register", registerRateLimiter, async (req, res) => {
       details: { name: user.name, email: user.email, role: user.role },
     });
 
-    // Never echo passwordHash or privateKeyRef back to the client.
+    // Never echo passwordHash, wrappedPrivateKey, or wrap salt/iv back here
+    // — the browser already has all three (it just generated/wrapped them);
+    // echoing them back would gain nothing and only widen where they
+    // appear in logs/responses.
     res.status(201).json({
       id: user.id,
       name: user.name,
@@ -168,7 +195,19 @@ router.post("/login", loginRateLimiter, async (req, res) => {
 
   logAuthEvent("LOGIN_SUCCESS", { userId: user.id, email: normalizedEmail });
 
-  res.json({ token });
+  // The wrapped key blob is useless without the password that was just
+  // verified above (and that password is never stored — only its bcrypt
+  // hash is) to re-derive the AES key client-side, so returning it here is
+  // safe: this response is the ONE place the browser can get its wrapped
+  // key back on a fresh session. Null for ADMIN (never signs anything) and
+  // for any account created before this field existed.
+  res.json({
+    token,
+    wrappedKey:
+      user.wrappedPrivateKey && user.wrapSalt && user.wrapIv
+        ? { ciphertext: user.wrappedPrivateKey, salt: user.wrapSalt, iv: user.wrapIv }
+        : null,
+  });
 });
 
 router.get("/me", requireAuth, async (req, res) => {

@@ -117,7 +117,7 @@ router.get("/:id/history", requireAuth, async (req, res) => {
     include: {
       signatures: {
         orderBy: { signedAt: "asc" },
-        // select, not include: true — the actor's passwordHash/privateKeyRef
+        // select, not include: true — the actor's passwordHash/wrapped key material
         // must never be fetched here even though this response strips the
         // raw signatures array before sending (see below).
         include: { actor: { select: { id: true, name: true, publicKey: true } } },

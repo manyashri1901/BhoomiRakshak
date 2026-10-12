@@ -55,7 +55,7 @@ router.post("/:id/revoke", requireAuth, requireRole("ADMIN"), async (req, res) =
 
 router.get("/:userId", requireAuth, async (req, res) => {
   // select, not include: true — only .name is used below; the full User
-  // row carries passwordHash and the raw RSA privateKeyRef.
+  // row carries passwordHash and wrapped key material.
   const certificate = await prisma.certificate.findUnique({
     where: { subjectUserId: req.params.userId },
     include: { subject: { select: { name: true } } },
