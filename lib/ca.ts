@@ -32,6 +32,12 @@ const CA_PUBLIC_KEY_PATH = path.join(CA_DIR, "ca-public.pem");
 
 const CA_ISSUER_NAME = "BhoomiRakshak Root CA";
 
+// Certificates are valid for one year from issuance. This bounds how long a
+// compromised or orphaned key pair stays trusted even if it's never
+// explicitly revoked — the other half of revocation (see
+// revokeCertificate/CRL below), not a replacement for it.
+const CERT_VALIDITY_DAYS = 365;
+
 interface KeyPairPem {
   publicKey: string;
   privateKey: string;
@@ -106,11 +112,13 @@ interface CertificatePayload {
   publicKey: string;
   issuer: string;
   issuedAt: string;
+  expiresAt: string;
 }
 
 function buildCertificatePayload(
   user: { id: string; name: string; role: string; publicKey: string },
   issuedAt: string,
+  expiresAt: string,
 ): CertificatePayload {
   return {
     subject: user.id,
@@ -119,6 +127,7 @@ function buildCertificatePayload(
     publicKey: user.publicKey,
     issuer: CA_ISSUER_NAME,
     issuedAt,
+    expiresAt,
   };
 }
 
@@ -141,6 +150,7 @@ export interface IssuedCertificate {
   publicKey: string;
   issuer: string;
   issuedAt: string;
+  expiresAt: string;
   signature: string;
   fingerprint: string;
   payloadHash: string;
@@ -173,8 +183,13 @@ export async function issueCertificate(
 ): Promise<IssuedCertificate> {
   const { privateKey } = ensureRootCA();
 
-  const issuedAt = new Date().toISOString();
-  const payload = buildCertificatePayload(user, issuedAt);
+  const issuedAtDate = new Date();
+  const expiresAtDate = new Date(issuedAtDate);
+  expiresAtDate.setUTCDate(expiresAtDate.getUTCDate() + CERT_VALIDITY_DAYS);
+
+  const issuedAt = issuedAtDate.toISOString();
+  const expiresAt = expiresAtDate.toISOString();
+  const payload = buildCertificatePayload(user, issuedAt, expiresAt);
   const canonicalPayload = canonicalStringify(payload);
   const payloadBuffer = Buffer.from(canonicalPayload, "utf8");
 
@@ -204,7 +219,8 @@ export async function issueCertificate(
       role: user.role,
       publicKey: user.publicKey,
       issuer: CA_ISSUER_NAME,
-      issuedAt: new Date(issuedAt),
+      issuedAt: issuedAtDate,
+      expiresAt: expiresAtDate,
       signature,
       fingerprint,
     },
@@ -221,6 +237,7 @@ export async function issueCertificate(
     publicKey: user.publicKey,
     issuer: CA_ISSUER_NAME,
     issuedAt,
+    expiresAt,
     signature,
     fingerprint,
     payloadHash,
@@ -240,11 +257,40 @@ export interface VerifyCertificateResult {
     role: string;
     issuer: string;
     issuedAt: string;
+    expiresAt: string;
     fingerprint: string;
     fingerprintMatches: boolean;
     payloadHash: string;
     signatureValid: boolean;
+    expired: boolean;
+    revoked: boolean;
+    revokedReason: string | null;
+    // Set only when `valid` is false — the single concrete reason a
+    // verify-path caller should surface to the user/report, rather than
+    // making them infer it from the boolean flags above.
+    reason: string | null;
   };
+}
+
+/**
+ * Looks up a user's certificate by their user id and verifies it live.
+ * Returns null if the user has no certificate at all (should only happen
+ * for a user row created outside the normal registration flow).
+ *
+ * This is the one entry point every signing/approval verify path should
+ * use to answer "is this actor's certificate currently trustworthy?" —
+ * centralizing the lookup+verify pair so every call site checks expiry and
+ * revocation the same way lib/ca.ts itself does, rather than re-deriving
+ * that logic (or forgetting a piece of it) at each call site.
+ */
+export async function verifyCertificateForUser(
+  userId: string,
+): Promise<VerifyCertificateResult | null> {
+  const certificate = await prisma.certificate.findUnique({
+    where: { subjectUserId: userId },
+  });
+  if (!certificate) return null;
+  return verifyCertificate(certificate.id);
 }
 
 /**
@@ -289,6 +335,7 @@ export async function verifyCertificate(
       publicKey: cert.publicKey,
     },
     cert.issuedAt.toISOString(),
+    cert.expiresAt.toISOString(),
   );
   const canonicalPayload = canonicalStringify(payload);
   const payloadBuffer = Buffer.from(canonicalPayload, "utf8");
@@ -313,8 +360,25 @@ export async function verifyCertificate(
     .digest("hex");
   const fingerprintMatches = recomputedFingerprint === cert.fingerprint;
 
+  // (e) Validity window + revocation — checked independently of the
+  // signature itself: a certificate can be cryptographically genuine and
+  // still untrusted because it expired or was revoked after issuance.
+  const now = new Date();
+  const expired = now > cert.expiresAt;
+  const revoked = cert.revoked;
+
+  const valid = signatureValid && fingerprintMatches && !expired && !revoked;
+
+  let reason: string | null = null;
+  if (!valid) {
+    if (!signatureValid) reason = "Certificate signature does not match the CA's public key (forged or tampered).";
+    else if (!fingerprintMatches) reason = "Stored fingerprint does not match the certificate's public key.";
+    else if (revoked) reason = `Certificate was revoked${cert.revokedReason ? `: ${cert.revokedReason}` : "."}`;
+    else if (expired) reason = `Certificate expired on ${cert.expiresAt.toISOString()}.`;
+  }
+
   return {
-    valid: signatureValid,
+    valid,
     details: {
       certificateId: cert.id,
       subject: cert.subjectUserId,
@@ -322,12 +386,109 @@ export async function verifyCertificate(
       role: cert.role,
       issuer: cert.issuer,
       issuedAt: cert.issuedAt.toISOString(),
+      expiresAt: cert.expiresAt.toISOString(),
       fingerprint: cert.fingerprint,
       fingerprintMatches,
       payloadHash,
       signatureValid,
+      expired,
+      revoked,
+      revokedReason: cert.revokedReason,
+      reason,
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// 3b. CERTIFICATE REVOCATION (CRL)
+// ---------------------------------------------------------------------------
+//
+// Revocation is the half of PKI trust that an expiry date alone can't cover:
+// a key compromised today must stop being trusted today, not up to a year
+// from now. Revoking never touches the certificate's signature or deletes
+// the row — it's a separate, additive fact ("the CA no longer vouches for
+// this") that every verify path (verifyCertificate above, and every
+// signature-chain check that calls it) must check independently of the
+// signature's own cryptographic validity.
+
+export interface RevokeCertificateInput {
+  certificateId: string;
+  revokedByUserId: string;
+  reason: string;
+}
+
+export interface RevokedCertificateSummary {
+  certificateId: string;
+  subjectUserId: string;
+  subjectName: string;
+  role: string;
+  fingerprint: string;
+  revokedAt: string;
+  revokedReason: string | null;
+  revokedByUserId: string | null;
+}
+
+export async function revokeCertificate(
+  input: RevokeCertificateInput,
+): Promise<RevokedCertificateSummary> {
+  const cert = await prisma.certificate.findUnique({
+    where: { id: input.certificateId },
+    include: { subject: { select: { name: true } } },
+  });
+  if (!cert) {
+    throw new Error(`Certificate not found: ${input.certificateId}`);
+  }
+  if (cert.revoked) {
+    throw new Error("Certificate is already revoked");
+  }
+
+  const revokedAt = new Date();
+  const updated = await prisma.certificate.update({
+    where: { id: input.certificateId },
+    data: {
+      revoked: true,
+      revokedAt,
+      revokedReason: input.reason,
+      revokedByUserId: input.revokedByUserId,
+    },
+  });
+
+  return {
+    certificateId: updated.id,
+    subjectUserId: updated.subjectUserId,
+    subjectName: cert.subject.name,
+    role: updated.role,
+    fingerprint: updated.fingerprint,
+    revokedAt: revokedAt.toISOString(),
+    revokedReason: updated.revokedReason,
+    revokedByUserId: updated.revokedByUserId,
+  };
+}
+
+/**
+ * The Certificate Revocation List: every certificate the CA has revoked,
+ * most recent first. Any stakeholder can fetch this to check a signer's
+ * standing independently of a specific transaction — the standard PKI
+ * pattern of publishing revocations rather than requiring a live per-cert
+ * query against the CA for every check.
+ */
+export async function getCRL(): Promise<RevokedCertificateSummary[]> {
+  const revoked = await prisma.certificate.findMany({
+    where: { revoked: true },
+    include: { subject: { select: { name: true } } },
+    orderBy: { revokedAt: "desc" },
+  });
+
+  return revoked.map((cert) => ({
+    certificateId: cert.id,
+    subjectUserId: cert.subjectUserId,
+    subjectName: cert.subject.name,
+    role: cert.role,
+    fingerprint: cert.fingerprint,
+    revokedAt: (cert.revokedAt ?? cert.issuedAt).toISOString(),
+    revokedReason: cert.revokedReason,
+    revokedByUserId: cert.revokedByUserId,
+  }));
 }
 
 // ---------------------------------------------------------------------------

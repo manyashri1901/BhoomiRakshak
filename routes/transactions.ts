@@ -12,7 +12,7 @@ import * as path from "node:path";
 import { prisma } from "../lib/prisma.ts";
 import { requireAuth, requireRole } from "../middleware/auth.ts";
 import { signTransaction, verifySignature } from "../lib/signing.ts";
-import { verifyCertificate } from "../lib/ca.ts";
+import { verifyCertificate, verifyCertificateForUser } from "../lib/ca.ts";
 import type { TransactionType } from "../generated/prisma/enums.ts";
 import type { TransactionModel, LandRecordModel, SignatureModel } from "../generated/prisma/models.ts";
 
@@ -28,6 +28,20 @@ const router = express.Router();
 
 const UPLOAD_DIR = path.resolve(process.cwd(), "uploads");
 const VALID_TYPES: TransactionType[] = ["REGISTRATION", "TRANSFER", "UPDATE"];
+
+// Checked before accepting ANY signature from `userId` — at creation and at
+// every review stage, for both the actor signing right now and every prior
+// signer already on the chain. A cryptographically valid RSA signature is
+// not enough on its own: the signer's certificate must also not be expired
+// or revoked at the moment we rely on it. Returns null when the actor's
+// certificate is currently trustworthy; otherwise a human-readable reason
+// to surface directly in the 403 response.
+async function certificateProblem(userId: string): Promise<string | null> {
+  const result = await verifyCertificateForUser(userId);
+  if (!result) return "No certificate found for this user.";
+  if (!result.valid) return result.details.reason ?? "Certificate is not valid.";
+  return null;
+}
 
 // Exported so the transaction payload can be rebuilt identically outside
 // this route (e.g. a verification script) without duplicating field order
@@ -157,6 +171,37 @@ router.post("/", requireAuth, requireRole("LANDOWNER"), async (req, res) => {
     return;
   }
 
+  // Double-sale guard: a record with any transaction mid-review is not
+  // ACTIVE (see the PENDING_VO/registrar-review flow below, which flips it
+  // back to ACTIVE on reject and leaves it PENDING while under review) —
+  // so this alone blocks starting a second transaction while one is live.
+  if (landRecord.status !== "ACTIVE") {
+    res.status(409).json({
+      error: `landRecord is not ACTIVE (current status: ${landRecord.status}) — it may already have a transaction pending review`,
+    });
+    return;
+  }
+
+  // Belt-and-braces on top of the status check above: even if the status
+  // column were ever out of sync, explicitly refuse a second transaction
+  // while one against the same record is still mid-review. The database
+  // itself also enforces this with a partial unique index (see migration
+  // add_pending_transaction_unique_index) as the race-condition-proof
+  // backstop — two concurrent requests both passing this check can still
+  // only have one succeed at the INSERT.
+  const existingPending = await prisma.transaction.findFirst({
+    where: {
+      landRecordId,
+      status: { in: ["PENDING_VO", "PENDING_REGISTRAR"] },
+    },
+  });
+  if (existingPending) {
+    res.status(409).json({
+      error: "A transaction is already pending review for this land record",
+    });
+    return;
+  }
+
   let fromOwnerId: string | null;
   let resolvedToOwnerId: string;
 
@@ -185,6 +230,12 @@ router.post("/", requireAuth, requireRole("LANDOWNER"), async (req, res) => {
     return;
   }
 
+  const certProblem = await certificateProblem(actorId);
+  if (certProblem) {
+    res.status(403).json({ error: `Cannot sign: ${certProblem}` });
+    return;
+  }
+
   // Fix the timestamp before signing/inserting so the exact same value
   // goes into both the signed payload and the stored row — if we let
   // Prisma's @default(now()) pick createdAt at insert time, we wouldn't
@@ -203,39 +254,59 @@ router.post("/", requireAuth, requireRole("LANDOWNER"), async (req, res) => {
 
   const { signatureValue, dataHash } = signTransaction(actor.privateKeyRef, payload);
 
-  const result = await prisma.$transaction(async (db) => {
-    const transaction = await db.transaction.create({
-      data: {
-        type: type as TransactionType,
-        landRecordId,
-        fromOwnerId,
-        toOwnerId: resolvedToOwnerId,
-        documentPath,
-        documentHash,
-        status: "PENDING_VO",
-        createdAt,
-      },
+  try {
+    const result = await prisma.$transaction(async (db) => {
+      const transaction = await db.transaction.create({
+        data: {
+          type: type as TransactionType,
+          landRecordId,
+          fromOwnerId,
+          toOwnerId: resolvedToOwnerId,
+          documentPath,
+          documentHash,
+          status: "PENDING_VO",
+          createdAt,
+        },
+      });
+
+      const signature = await db.signature.create({
+        data: {
+          transactionId: transaction.id,
+          actorId,
+          role: actor.role,
+          signatureValue,
+          dataHash,
+        },
+      });
+
+      await db.landRecord.update({
+        where: { id: landRecordId },
+        data: { status: "PENDING" },
+      });
+
+      return { transaction, signature };
     });
 
-    const signature = await db.signature.create({
-      data: {
-        transactionId: transaction.id,
-        actorId,
-        role: actor.role,
-        signatureValue,
-        dataHash,
-      },
-    });
-
-    await db.landRecord.update({
-      where: { id: landRecordId },
-      data: { status: "PENDING" },
-    });
-
-    return { transaction, signature };
-  });
-
-  res.status(201).json({ ...result.transaction, signature: result.signature });
+    res.status(201).json({ ...result.transaction, signature: result.signature });
+  } catch (err: unknown) {
+    // P2002 (unique constraint violation) via the partial unique index on
+    // (landRecordId) WHERE status IN (PENDING_VO, PENDING_REGISTRAR) — the
+    // race-condition backstop behind the findFirst check above: two
+    // concurrent requests can both pass that check, but only one INSERT
+    // wins here.
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "code" in err &&
+      (err as { code?: string }).code === "P2002"
+    ) {
+      res.status(409).json({
+        error: "A transaction is already pending review for this land record",
+      });
+      return;
+    }
+    throw err;
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -410,12 +481,18 @@ router.post(
       landownerPayload,
       landownerSignature.signatureValue,
     );
+    const landownerCertProblem = landownerValid
+      ? await certificateProblem(landownerSignature.actorId)
+      : null;
 
-    if (!landownerValid) {
+    if (!landownerValid || landownerCertProblem) {
+      const failureReason = !landownerValid
+        ? "Landowner signature verification failed"
+        : `Landowner certificate invalid: ${landownerCertProblem}`;
       const updated = await prisma.$transaction(async (db) => {
         const txn = await db.transaction.update({
           where: { id: transaction.id },
-          data: { status: "REJECTED", rejectReason: "Landowner signature verification failed" },
+          data: { status: "REJECTED", rejectReason: failureReason },
         });
         await db.landRecord.update({
           where: { id: transaction.landRecordId },
@@ -426,7 +503,7 @@ router.post(
       res.status(200).json({
         transaction: updated,
         autoRejected: true,
-        reason: "Landowner signature verification failed",
+        reason: failureReason,
       });
       return;
     }
@@ -461,6 +538,12 @@ router.post(
     const vo = await prisma.user.findUnique({ where: { id: voId } });
     if (!vo) {
       res.status(401).json({ error: "Acting user no longer exists" });
+      return;
+    }
+
+    const voCertProblem = await certificateProblem(voId);
+    if (voCertProblem) {
+      res.status(403).json({ error: `Cannot sign: ${voCertProblem}` });
       return;
     }
 
@@ -572,13 +655,18 @@ router.post(
       voSignature.signatureValue,
     );
 
-    if (!landownerValid || !voValid) {
-      const failureReason =
-        !landownerValid && !voValid
-          ? "Landowner and Village Officer signature verification both failed"
-          : !landownerValid
-            ? "Landowner signature verification failed"
-            : "Village Officer signature verification failed";
+    const landownerCertProblem = landownerValid
+      ? await certificateProblem(landownerSignature.actorId)
+      : null;
+    const voCertProblem = voValid ? await certificateProblem(voSignature.actorId) : null;
+
+    if (!landownerValid || !voValid || landownerCertProblem || voCertProblem) {
+      const problems: string[] = [];
+      if (!landownerValid) problems.push("Landowner signature verification failed");
+      else if (landownerCertProblem) problems.push(`Landowner certificate invalid: ${landownerCertProblem}`);
+      if (!voValid) problems.push("Village Officer signature verification failed");
+      else if (voCertProblem) problems.push(`Village Officer certificate invalid: ${voCertProblem}`);
+      const failureReason = problems.join("; ");
 
       const updated = await prisma.$transaction(async (db) => {
         const txn = await db.transaction.update({
@@ -627,6 +715,12 @@ router.post(
     const registrar = await prisma.user.findUnique({ where: { id: registrarId } });
     if (!registrar) {
       res.status(401).json({ error: "Acting user no longer exists" });
+      return;
+    }
+
+    const registrarCertProblem = await certificateProblem(registrarId);
+    if (registrarCertProblem) {
+      res.status(403).json({ error: `Cannot sign: ${registrarCertProblem}` });
       return;
     }
 
@@ -707,14 +801,15 @@ router.get("/:id/verify", requireAuth, async (req, res) => {
       const certificate = await prisma.certificate.findUnique({
         where: { subjectUserId: link.actorId },
       });
-      const certificateValid = certificate
-        ? (await verifyCertificate(certificate.id)).valid
-        : false;
+      const result = certificate ? await verifyCertificate(certificate.id) : null;
       return {
         actorId: link.actorId,
         actorName: link.actorName,
         role: link.role,
-        certificateValid,
+        certificateValid: result?.valid ?? false,
+        certificateReason: result
+          ? result.details.reason
+          : "No certificate found for this user.",
       };
     }),
   );

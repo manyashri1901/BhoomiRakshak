@@ -8,6 +8,7 @@ import express from "express";
 import { prisma } from "../lib/prisma.ts";
 import { requireAuth, requireRole } from "../middleware/auth.ts";
 import { verifySignatureChain, checkDocumentIntegrity } from "./transactions.ts";
+import { verifyCertificateForUser } from "../lib/ca.ts";
 import type { AreaUnit } from "../generated/prisma/enums.ts";
 
 const VALID_AREA_UNITS: AreaUnit[] = ["HECTARE", "ACRE"];
@@ -126,12 +127,22 @@ router.get("/:id/history", requireAuth, async (req, res) => {
 
   const transactionsWithLiveVerification = await Promise.all(
     transactions.map(async (transaction) => {
-      const signatureResults = verifySignatureChain(transaction).map((link) => ({
-        actorName: link.actorName,
-        role: link.role,
-        signedAt: link.signedAt,
-        valid: link.valid, // live check, not the cached `valid` column
-      }));
+      const chain = verifySignatureChain(transaction);
+      const signatureResults = await Promise.all(
+        chain.map(async (link) => {
+          const certResult = await verifyCertificateForUser(link.actorId);
+          return {
+            actorName: link.actorName,
+            role: link.role,
+            signedAt: link.signedAt,
+            valid: link.valid, // live check, not the cached `valid` column
+            certificateValid: certResult?.valid ?? false,
+            certificateReason: certResult
+              ? certResult.details.reason
+              : "No certificate found for this user.",
+          };
+        }),
+      );
       const documentIntegrity = await checkDocumentIntegrity(transaction);
 
       const { signatures: _signatures, ...transactionFields } = transaction;

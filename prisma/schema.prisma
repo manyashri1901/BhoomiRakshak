@@ -14,6 +14,7 @@ enum Role {
   LANDOWNER
   VILLAGE_OFFICER
   REGISTRAR
+  ADMIN
 }
 
 enum LandRecordStatus {
@@ -51,25 +52,32 @@ model User {
   privateKeyRef String   @db.Text
   createdAt     DateTime @default(now())
 
-  certificate        Certificate?
+  certificate         Certificate?
   ownedLandRecords    LandRecord[]
   transactionsFrom    Transaction[] @relation("TransactionFromOwner")
   transactionsTo      Transaction[] @relation("TransactionToOwner")
   signatures          Signature[]
+  revokedCertificates Certificate[] @relation("CertificateRevokedBy")
 
   @@map("users")
 }
 
 model Certificate {
-  id            String   @id @default(cuid())
-  subjectUserId String   @unique
-  subject       User     @relation(fields: [subjectUserId], references: [id], onDelete: Restrict)
-  role          Role
-  publicKey     String   @db.Text
-  issuer        String   @default("BhoomiRakshak Root CA")
-  issuedAt      DateTime @default(now())
-  signature     String   @db.Text
-  fingerprint   String
+  id              String    @id @default(cuid())
+  subjectUserId   String    @unique
+  subject         User      @relation(fields: [subjectUserId], references: [id], onDelete: Restrict)
+  role            Role
+  publicKey       String    @db.Text
+  issuer          String    @default("BhoomiRakshak Root CA")
+  issuedAt        DateTime  @default(now())
+  expiresAt       DateTime
+  signature       String    @db.Text
+  fingerprint     String
+  revoked         Boolean   @default(false)
+  revokedAt       DateTime?
+  revokedReason   String?
+  revokedByUserId String?
+  revokedBy       User?     @relation("CertificateRevokedBy", fields: [revokedByUserId], references: [id], onDelete: SetNull)
 
   @@map("certificates")
 }
