@@ -12,12 +12,14 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { prisma } from "../lib/prisma.ts";
 import { requireAuth } from "../middleware/auth.ts";
+import { loginRateLimiter, registerRateLimiter } from "../middleware/rateLimit.ts";
 import {
   generateUserKeyPair,
   proveKeyPossession,
   verifyKeyPossession,
   issueCertificate,
 } from "../lib/ca.ts";
+import { appendAuditEntry } from "../lib/audit.ts";
 import type { Role } from "../generated/prisma/enums.ts";
 
 const router = express.Router();
@@ -26,7 +28,7 @@ const VALID_ROLES: Role[] = ["LANDOWNER", "VILLAGE_OFFICER", "REGISTRAR"];
 const BCRYPT_SALT_ROUNDS = 10;
 const JWT_SECRET = process.env.JWT_SECRET as string;
 
-router.post("/register", async (req, res) => {
+router.post("/register", registerRateLimiter, async (req, res) => {
   const { name, email, password, role } = req.body ?? {};
 
   if (typeof name !== "string" || !name.trim()) {
@@ -89,6 +91,14 @@ router.post("/register", async (req, res) => {
       publicKey: user.publicKey,
     });
 
+    await appendAuditEntry({
+      action: "USER_REGISTERED",
+      actorUserId: user.id,
+      entityType: "USER",
+      entityId: user.id,
+      details: { name: user.name, email: user.email, role: user.role },
+    });
+
     // Never echo passwordHash or privateKeyRef back to the client.
     res.status(201).json({
       id: user.id,
@@ -110,33 +120,54 @@ router.post("/register", async (req, res) => {
   }
 });
 
-router.post("/login", async (req, res) => {
+router.post("/login", loginRateLimiter, async (req, res) => {
   const { email, password } = req.body ?? {};
 
   if (typeof email !== "string" || typeof password !== "string") {
     res.status(400).json({ error: "email and password are required" });
     return;
   }
+  const normalizedEmail = email.trim().toLowerCase();
 
   const user = await prisma.user.findUnique({
-    where: { email: email.trim().toLowerCase() },
+    where: { email: normalizedEmail },
   });
 
   // Same error for "no such user" and "wrong password" so login can't be
   // used to enumerate registered emails.
   if (!user) {
+    await appendAuditEntry({
+      action: "LOGIN_FAILURE",
+      entityType: "USER",
+      details: { email: normalizedEmail, reason: "No such user" },
+    });
     res.status(401).json({ error: "Invalid email or password" });
     return;
   }
 
   const passwordValid = await bcrypt.compare(password, user.passwordHash);
   if (!passwordValid) {
+    await appendAuditEntry({
+      action: "LOGIN_FAILURE",
+      actorUserId: user.id,
+      entityType: "USER",
+      entityId: user.id,
+      details: { email: normalizedEmail, reason: "Wrong password" },
+    });
     res.status(401).json({ error: "Invalid email or password" });
     return;
   }
 
   const token = jwt.sign({ userId: user.id, role: user.role }, JWT_SECRET, {
     expiresIn: "1h",
+  });
+
+  await appendAuditEntry({
+    action: "LOGIN_SUCCESS",
+    actorUserId: user.id,
+    entityType: "USER",
+    entityId: user.id,
+    details: { email: normalizedEmail },
   });
 
   res.json({ token });

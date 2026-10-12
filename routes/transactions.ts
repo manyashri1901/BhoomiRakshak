@@ -13,6 +13,7 @@ import { prisma } from "../lib/prisma.ts";
 import { requireAuth, requireRole } from "../middleware/auth.ts";
 import { signTransaction, verifySignature } from "../lib/signing.ts";
 import { verifyCertificate, verifyCertificateForUser } from "../lib/ca.ts";
+import { appendAuditEntryTx } from "../lib/audit.ts";
 import type { TransactionType } from "../generated/prisma/enums.ts";
 import type { TransactionModel, LandRecordModel, SignatureModel } from "../generated/prisma/models.ts";
 
@@ -284,6 +285,14 @@ router.post("/", requireAuth, requireRole("LANDOWNER"), async (req, res) => {
         data: { status: "PENDING" },
       });
 
+      await appendAuditEntryTx(db, {
+        action: "TRANSACTION_CREATED",
+        actorUserId: actorId,
+        entityType: "TRANSACTION",
+        entityId: transaction.id,
+        details: { type, landRecordId, documentHash },
+      });
+
       return { transaction, signature };
     });
 
@@ -498,6 +507,13 @@ router.post(
           where: { id: transaction.landRecordId },
           data: { status: "ACTIVE" },
         });
+        await appendAuditEntryTx(db, {
+          action: "VO_REVIEW",
+          actorUserId: req.user!.userId,
+          entityType: "TRANSACTION",
+          entityId: transaction.id,
+          details: { decision: "AUTO_REJECTED", reason: failureReason },
+        });
         return txn;
       });
       res.status(200).json({
@@ -526,6 +542,13 @@ router.post(
         await db.landRecord.update({
           where: { id: transaction.landRecordId },
           data: { status: "ACTIVE" },
+        });
+        await appendAuditEntryTx(db, {
+          action: "VO_REVIEW",
+          actorUserId: req.user!.userId,
+          entityType: "TRANSACTION",
+          entityId: transaction.id,
+          details: { decision: "REJECT", reason },
         });
         return txn;
       });
@@ -577,6 +600,13 @@ router.post(
           dataHash,
           signedAt: reviewedAt,
         },
+      });
+      await appendAuditEntryTx(db, {
+        action: "VO_REVIEW",
+        actorUserId: voId,
+        entityType: "TRANSACTION",
+        entityId: transaction.id,
+        details: { decision: "APPROVE" },
       });
       return { txn, signature };
     });
@@ -677,6 +707,13 @@ router.post(
           where: { id: transaction.landRecordId },
           data: { status: "ACTIVE" },
         });
+        await appendAuditEntryTx(db, {
+          action: "REGISTRAR_REVIEW",
+          actorUserId: req.user!.userId,
+          entityType: "TRANSACTION",
+          entityId: transaction.id,
+          details: { decision: "AUTO_REJECTED", reason: failureReason },
+        });
         return txn;
       });
       res.status(200).json({ transaction: updated, autoRejected: true, reason: failureReason });
@@ -701,6 +738,13 @@ router.post(
         await db.landRecord.update({
           where: { id: transaction.landRecordId },
           data: { status: "ACTIVE" },
+        });
+        await appendAuditEntryTx(db, {
+          action: "REGISTRAR_REVIEW",
+          actorUserId: req.user!.userId,
+          entityType: "TRANSACTION",
+          entityId: transaction.id,
+          details: { decision: "REJECT", reason },
         });
         return txn;
       });
@@ -765,6 +809,14 @@ router.post(
       const landRecord = await db.landRecord.update({
         where: { id: transaction.landRecordId },
         data: landRecordUpdate,
+      });
+
+      await appendAuditEntryTx(db, {
+        action: "REGISTRAR_REVIEW",
+        actorUserId: registrarId,
+        entityType: "TRANSACTION",
+        entityId: transaction.id,
+        details: { decision: "APPROVE" },
       });
 
       return { txn, signature, landRecord };

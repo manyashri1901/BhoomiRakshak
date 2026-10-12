@@ -18,6 +18,7 @@ import express from "express";
 import * as crypto from "node:crypto";
 import { prisma } from "../lib/prisma.ts";
 import { requireAuth, requireRole } from "../middleware/auth.ts";
+import { appendAuditEntry } from "../lib/audit.ts";
 
 const router = express.Router();
 
@@ -40,6 +41,14 @@ router.post("/tamper/:transactionId", requireAuth, requireRole("REGISTRAR"), asy
   const updated = await prisma.transaction.update({
     where: { id: transaction.id },
     data: { documentHash: tamperedHash },
+  });
+
+  await appendAuditEntry({
+    action: "DEMO_TAMPER_USED",
+    actorUserId: req.user!.userId,
+    entityType: "TRANSACTION",
+    entityId: transaction.id,
+    details: {},
   });
 
   res.json(updated);

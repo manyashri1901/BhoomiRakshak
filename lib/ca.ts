@@ -20,6 +20,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { prisma } from "./prisma.ts";
 import { canonicalStringify } from "./canonicalize.ts";
+import { appendAuditEntry } from "./audit.ts";
 import type { Role } from "../generated/prisma/enums.ts";
 
 // ---------------------------------------------------------------------------
@@ -224,6 +225,14 @@ export async function issueCertificate(
       signature,
       fingerprint,
     },
+  });
+
+  await appendAuditEntry({
+    action: "CERTIFICATE_ISSUED",
+    actorUserId: user.id,
+    entityType: "CERTIFICATE",
+    entityId: record.id,
+    details: { subjectUserId: user.id, role: user.role, fingerprint },
   });
 
   // (f) Return the full certificate, including the payload hash for
@@ -451,6 +460,14 @@ export async function revokeCertificate(
       revokedReason: input.reason,
       revokedByUserId: input.revokedByUserId,
     },
+  });
+
+  await appendAuditEntry({
+    action: "CERTIFICATE_REVOKED",
+    actorUserId: input.revokedByUserId,
+    entityType: "CERTIFICATE",
+    entityId: updated.id,
+    details: { subjectUserId: updated.subjectUserId, reason: input.reason },
   });
 
   return {

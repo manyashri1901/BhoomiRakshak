@@ -3,6 +3,7 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
 import type { NextFunction, Request, Response } from "express";
 import authRouter from "./routes/auth.ts";
 import documentsRouter from "./routes/documents.ts";
@@ -10,10 +11,13 @@ import landRecordsRouter from "./routes/land-records.ts";
 import transactionsRouter from "./routes/transactions.ts";
 import certificatesRouter from "./routes/certificates.ts";
 import usersRouter from "./routes/users.ts";
+import auditRouter from "./routes/audit.ts";
 import devRouter from "./routes/dev.ts";
 import { requireAuth, requireRole } from "./middleware/auth.ts";
 
 const app = express();
+
+app.use(helmet());
 
 // The frontend (Vite dev server) runs on a different origin, so the
 // browser needs an explicit CORS allow — auth is via a Bearer token in the
@@ -31,7 +35,15 @@ app.use("/api/land-records", landRecordsRouter);
 app.use("/api/transactions", transactionsRouter);
 app.use("/api/certificates", certificatesRouter);
 app.use("/api/users", usersRouter);
-app.use("/api/dev", devRouter); // DEMO-ONLY — see routes/dev.ts
+app.use("/api/audit", auditRouter);
+
+// DEMO-ONLY, and only when explicitly opted into — see routes/dev.ts. Not
+// mounting the router at all (rather than mounting it and gating inside)
+// means every /api/dev/* request 404s exactly like any other unknown
+// route when this flag isn't set, with no trace that the route exists.
+if (process.env.ENABLE_DEMO_TAMPER === "true") {
+  app.use("/api/dev", devRouter);
+}
 
 // Protected test route (Step 4): only a logged-in Registrar can reach this.
 app.get(
