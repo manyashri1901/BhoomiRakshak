@@ -1,4 +1,4 @@
-export type Role = "LANDOWNER" | "VILLAGE_OFFICER" | "REGISTRAR";
+export type Role = "LANDOWNER" | "VILLAGE_OFFICER" | "REGISTRAR" | "ADMIN";
 
 export interface AuthUser {
   userId: string;
@@ -104,6 +104,8 @@ export interface HistorySignature {
   role: Role;
   signedAt: string;
   valid: boolean;
+  certificateValid: boolean;
+  certificateReason: string | null;
 }
 
 export interface DocumentIntegrityResult {
@@ -139,8 +141,24 @@ export interface Certificate {
   publicKey: string;
   issuer: string;
   issuedAt: string;
+  expiresAt: string;
   fingerprint: string;
+  revoked: boolean;
+  revokedAt: string | null;
+  revokedReason: string | null;
   valid: boolean;
+  reason: string | null;
+}
+
+export interface RevokedCertificateSummary {
+  certificateId: string;
+  subjectUserId: string;
+  subjectName: string;
+  role: Role;
+  fingerprint: string;
+  revokedAt: string;
+  revokedReason: string | null;
+  revokedByUserId: string | null;
 }
 
 export interface TransactionVerifyResult {
@@ -151,6 +169,7 @@ export interface TransactionVerifyResult {
     actorName: string;
     role: Role;
     certificateValid: boolean;
+    certificateReason: string | null;
   }[];
   signatureValidity: {
     actorName: string;

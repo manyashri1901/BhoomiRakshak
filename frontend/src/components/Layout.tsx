@@ -7,6 +7,7 @@ const ROLE_NAV: Record<Role, { to: string; label: string }> = {
   LANDOWNER: { to: "/landowner", label: "My Land" },
   VILLAGE_OFFICER: { to: "/village-officer", label: "Review Queue" },
   REGISTRAR: { to: "/registrar", label: "Registrar Queue" },
+  ADMIN: { to: "/admin", label: "Admin" },
 };
 
 function navLinkClasses(isActive: boolean) {

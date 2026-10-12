@@ -10,6 +10,7 @@ import { RegisterPage } from "./pages/RegisterPage";
 import { LandownerDashboard } from "./pages/LandownerDashboard";
 import { VillageOfficerDashboard } from "./pages/VillageOfficerDashboard";
 import { RegistrarDashboard } from "./pages/RegistrarDashboard";
+import { AdminDashboard } from "./pages/AdminDashboard";
 import { LandRecordsRegistry } from "./pages/LandRecordsRegistry";
 import { LandRecordDetail } from "./pages/LandRecordDetail";
 import { CertificateLookup } from "./pages/CertificateLookup";
@@ -53,6 +54,9 @@ export default function App() {
           </Route>
           <Route element={<RoleRoute allowed={["REGISTRAR"]} />}>
             <Route path="/registrar" element={<RegistrarDashboard />} />
+          </Route>
+          <Route element={<RoleRoute allowed={["ADMIN"]} />}>
+            <Route path="/admin" element={<AdminDashboard />} />
           </Route>
         </Route>
 
