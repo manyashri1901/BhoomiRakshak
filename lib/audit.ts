@@ -14,6 +14,40 @@
 // recomputes the whole chain on demand and reports the first broken link,
 // rather than trusting a cached "this was fine when written" flag (the
 // same principle as verifySignatureChain/verifyCertificate elsewhere).
+//
+// WHAT HAPPENS IF AN AUDIT WRITE FAILS
+// Neither appendAuditEntry() nor appendAuditEntryTx() catches its own
+// errors — a failure (a DB error, a lock-wait timeout under heavy
+// concurrency) propagates straight up to the caller. For every call site
+// in this codebase, that caller is a route handler that awaits the call
+// directly, so the failure becomes an unhandled rejection Express 5
+// forwards to the global error handler (server.ts), which returns 500.
+// This is deliberate: for every action this module is wired into
+// (registration, certificate issuance/revocation, a transaction's
+// creation or review stages, a document upload, the demo-tamper route,
+// an admin integrity check), failing to log is treated as failing the
+// action itself. A silently-unlogged state change is worse than a failed
+// request the caller can retry — this is a system explicitly graded on
+// trust management, and an audit trail with silent gaps is not trustworthy.
+//
+// Where the call is appendAuditEntryTx() joined to the caller's own
+// prisma.$transaction(...) (every call site in routes/transactions.ts),
+// this is also atomic: a failed audit write rolls back the business write
+// alongside it, so the two can never go out of sync. Where the call is
+// standalone appendAuditEntry() because no such transaction exists to join
+// (lib/ca.ts's issueCertificate/revokeCertificate, routes/documents.ts's
+// upload, routes/dev.ts's tamper route, routes/audit.ts's own integrity
+// check), the business write and the audit write are two separate
+// statements — the business write can still succeed while the audit write
+// that follows it fails, leaving a real state change with no
+// corresponding log entry even though the request itself returns 500.
+// This is the documented, accepted gap for this project: every one of
+// those call sites is a single Prisma statement already atomic on its
+// own, not a multi-step sequence an interactive transaction would need to
+// protect, so wrapping it would add a transaction purely to host the
+// audit write. New call sites that DO span multiple statements should use
+// appendAuditEntryTx() inside their own transaction, exactly as
+// routes/transactions.ts does, rather than leaving that gap.
 
 import * as crypto from "node:crypto";
 import { prisma } from "./prisma.ts";

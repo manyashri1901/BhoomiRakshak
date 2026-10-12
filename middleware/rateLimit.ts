@@ -6,7 +6,8 @@
 // (each attempt consumes an email address). Both thresholds are
 // env-configurable so a load test can raise them without a code change.
 
-import { rateLimit } from "express-rate-limit";
+import { rateLimit, ipKeyGenerator } from "express-rate-limit";
+import type { Request } from "express";
 
 function envInt(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -15,12 +16,31 @@ function envInt(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function emailFromBody(req: Request): string {
+  const email = (req.body as { email?: unknown } | undefined)?.email;
+  return typeof email === "string" ? email.trim().toLowerCase() : "";
+}
+
+// Keyed by IP + the attempted email, not IP alone: one attacker hammering
+// a single victim's account still gets capped quickly (their IP+email
+// bucket fills), but it no longer locks every OTHER account on the same
+// IP out of logging in too — which a pure-IP key would do on any shared
+// IP (an office NAT, a campus network, or every tester on one dev
+// machine, as happened while testing this). ipKeyGenerator() normalizes
+// IPv6 addresses to a /56 subnet so rotating within one, and rate-limit's
+// own validator doesn't warn about a raw req.ip bypass.
 export const loginRateLimiter = rateLimit({
   windowMs: envInt("RATE_LIMIT_LOGIN_WINDOW_MS", 15 * 60 * 1000),
-  limit: envInt("RATE_LIMIT_LOGIN_MAX", 5),
+  limit: envInt("RATE_LIMIT_LOGIN_MAX", 10),
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: "Too many login attempts. Please try again later." },
+  // A request that ends in a successful login (status < 400) doesn't count
+  // against the budget at all — only failed attempts accumulate, so a user
+  // who mistypes their password a few times before getting it right is
+  // never locked out by their own eventual success.
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => `${ipKeyGenerator(req.ip ?? "")}:${emailFromBody(req)}`,
+  message: { error: "Too many login attempts for this account. Please try again later." },
 });
 
 export const registerRateLimiter = rateLimit({

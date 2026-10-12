@@ -17,6 +17,29 @@ import { requireAuth, requireRole } from "./middleware/auth.ts";
 
 const app = express();
 
+// Rate limiting and anything else keyed by req.ip only sees the real
+// client address if Express knows to read it from X-Forwarded-For rather
+// than using the connecting socket's address — which, behind a host like
+// Render, is the platform's own reverse proxy, not the client. Trusting
+// that header blindly would let a client forge their own IP, so this is
+// opt-in and explicit: TRUST_PROXY unset defaults to 1 (trust exactly one
+// hop) in production, where there IS always exactly one reverse proxy in
+// front of this process, and to false in development, where there is no
+// proxy and nothing should be trusted to supply a fake client IP.
+// TRUST_PROXY accepts "true"/"false", a hop count (e.g. "1"), or any
+// string express's own `trust proxy` setting understands (e.g. "loopback").
+function resolveTrustProxy(): boolean | number | string {
+  const raw = process.env.TRUST_PROXY;
+  if (raw === undefined) {
+    return process.env.NODE_ENV === "production" ? 1 : false;
+  }
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  const asNumber = Number(raw);
+  return Number.isFinite(asNumber) ? asNumber : raw;
+}
+app.set("trust proxy", resolveTrustProxy());
+
 app.use(helmet());
 
 // The frontend (Vite dev server) runs on a different origin, so the

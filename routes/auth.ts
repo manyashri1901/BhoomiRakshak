@@ -28,6 +28,20 @@ const VALID_ROLES: Role[] = ["LANDOWNER", "VILLAGE_OFFICER", "REGISTRAR"];
 const BCRYPT_SALT_ROUNDS = 10;
 const JWT_SECRET = process.env.JWT_SECRET as string;
 
+// Login success/failure is high-volume and not something the PKI trust
+// chain depends on (unlike registration, cert issuance/revocation, or a
+// transaction's review stages — see lib/audit.ts), so it goes to
+// structured console output instead of the audit hash chain: every write
+// to that chain is serialized behind one advisory lock (see
+// AUDIT_CHAIN_LOCK_KEY in lib/audit.ts), and every failed login attempt —
+// exactly the traffic a brute-force or credential-stuffing attempt
+// generates — would otherwise compete for that same lock with real,
+// chain-worthy events. A structured line here is still fully greppable/
+// ingestible by any log pipeline, just outside the tamper-evident chain.
+function logAuthEvent(event: "LOGIN_FAILURE" | "LOGIN_SUCCESS", fields: Record<string, unknown>) {
+  console.log(JSON.stringify({ level: "info", event, timestamp: new Date().toISOString(), ...fields }));
+}
+
 router.post("/register", registerRateLimiter, async (req, res) => {
   const { name, email, password, role } = req.body ?? {};
 
@@ -136,24 +150,14 @@ router.post("/login", loginRateLimiter, async (req, res) => {
   // Same error for "no such user" and "wrong password" so login can't be
   // used to enumerate registered emails.
   if (!user) {
-    await appendAuditEntry({
-      action: "LOGIN_FAILURE",
-      entityType: "USER",
-      details: { email: normalizedEmail, reason: "No such user" },
-    });
+    logAuthEvent("LOGIN_FAILURE", { email: normalizedEmail, reason: "No such user" });
     res.status(401).json({ error: "Invalid email or password" });
     return;
   }
 
   const passwordValid = await bcrypt.compare(password, user.passwordHash);
   if (!passwordValid) {
-    await appendAuditEntry({
-      action: "LOGIN_FAILURE",
-      actorUserId: user.id,
-      entityType: "USER",
-      entityId: user.id,
-      details: { email: normalizedEmail, reason: "Wrong password" },
-    });
+    logAuthEvent("LOGIN_FAILURE", { userId: user.id, email: normalizedEmail, reason: "Wrong password" });
     res.status(401).json({ error: "Invalid email or password" });
     return;
   }
@@ -162,13 +166,7 @@ router.post("/login", loginRateLimiter, async (req, res) => {
     expiresIn: "1h",
   });
 
-  await appendAuditEntry({
-    action: "LOGIN_SUCCESS",
-    actorUserId: user.id,
-    entityType: "USER",
-    entityId: user.id,
-    details: { email: normalizedEmail },
-  });
+  logAuthEvent("LOGIN_SUCCESS", { userId: user.id, email: normalizedEmail });
 
   res.json({ token });
 });
