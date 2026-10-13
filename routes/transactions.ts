@@ -32,6 +32,17 @@ import { appendAuditEntryTx } from "../lib/audit.ts";
 import type { TransactionType } from "../generated/prisma/enums.ts";
 import type { TransactionModel, LandRecordModel, SignatureModel } from "../generated/prisma/models.ts";
 
+// Every business-write transaction below also writes an audit entry
+// (appendAuditEntryTx, lib/audit.ts), which needs its own round trips on
+// top of the business write's — against a remote Neon instance that adds
+// up to more than Prisma's default 5s interactive-transaction timeout
+// (observed directly: a single, uncontended submit took ~5.8s end to end).
+// This isn't lock contention (that's lib/audit.ts's concern, documented
+// there) — it's that several sequential awaited queries in one
+// transaction, each a network round trip, cost more than 5s against this
+// specific remote database. Same fix as lib/audit.ts: give it headroom.
+const TRANSACTION_OPTIONS = { maxWait: 15_000, timeout: 15_000 };
+
 // The actor relation on a signature is deliberately narrowed at the query
 // level (see transactionWithChain) to never pull passwordHash or wrapped
 // key material. certificateFingerprint comes along in the same query so
@@ -548,7 +559,7 @@ router.post("/submit", requireAuth, requireRole("LANDOWNER"), async (req, res) =
       });
 
       return { transaction, signature };
-    });
+    }, TRANSACTION_OPTIONS);
 
     res.status(201).json({ ...result.transaction, signature: result.signature });
   } catch (err: unknown) {
@@ -627,7 +638,7 @@ async function autoRejectTransaction(
       details: { decision: "AUTO_REJECTED", reason: failureReason },
     });
     return txn;
-  });
+  }, TRANSACTION_OPTIONS);
 }
 
 // POST /api/transactions/:id/vo-review/reject
@@ -682,7 +693,7 @@ router.post("/:id/vo-review/reject", requireAuth, requireRole("VILLAGE_OFFICER")
       details: { decision: "REJECT", reason },
     });
     return txn;
-  });
+  }, TRANSACTION_OPTIONS);
   res.json(updated);
 });
 
@@ -842,7 +853,7 @@ router.post("/:id/vo-review/submit", requireAuth, requireRole("VILLAGE_OFFICER")
         details: { decision: "APPROVE" },
       });
       return { txn, signature };
-    });
+    }, TRANSACTION_OPTIONS);
 
     res.json({ ...result.txn, signature: result.signature });
   } catch (err: unknown) {
@@ -970,7 +981,7 @@ router.post("/:id/registrar-review/reject", requireAuth, requireRole("REGISTRAR"
       details: { decision: "REJECT", reason },
     });
     return txn;
-  });
+  }, TRANSACTION_OPTIONS);
   res.json(updated);
 });
 
@@ -1142,7 +1153,7 @@ router.post("/:id/registrar-review/submit", requireAuth, requireRole("REGISTRAR"
       });
 
       return { txn, signature, landRecord };
-    });
+    }, TRANSACTION_OPTIONS);
 
     res.json({ ...result.txn, signature: result.signature, landRecord: result.landRecord });
   } catch (err: unknown) {
