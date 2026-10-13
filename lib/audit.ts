@@ -93,7 +93,7 @@ export interface AuditLogEntry {
   hash: string;
 }
 
-interface HashableFields {
+export interface HashableFields {
   seq: number;
   action: string;
   actorUserId: string | null;
@@ -105,7 +105,10 @@ interface HashableFields {
   prevHash: string;
 }
 
-function computeEntryHash(fields: HashableFields): string {
+// Exported so callers that need to check one specific row in isolation
+// (scripts/attack-simulation.ts's tamper-then-restore test) reuse the
+// exact same formula rather than risking a subtly different reimplementation.
+export function computeEntryHash(fields: HashableFields): string {
   const canonical = canonicalStringify(fields);
   return crypto.createHash("sha256").update(canonical, "utf8").digest("hex");
 }

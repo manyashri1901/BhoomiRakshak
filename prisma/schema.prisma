@@ -196,7 +196,15 @@ model AuditLog {
   seq           Int      @unique
   action        String
   actorUserId   String?
-  actor         User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  // Restrict, not SetNull: actorUserId is one of the fields this row's
+  // hash commits to (see the comment above). Silently nulling it out from
+  // under a written row — which SetNull would do the moment that user is
+  // ever deleted — mutates hashed data after the fact, which looks
+  // identical to tampering when verifyAuditChain() recomputes the hash.
+  // Restrict instead makes deleting a user with audit history fail loudly,
+  // which is the correct behavior for an immutable log: you cannot delete
+  // your way out of someone's audit trail.
+  actor         User?    @relation(fields: [actorUserId], references: [id], onDelete: Restrict)
   entityType    String
   entityId      String?
   // Free-form context for the action (e.g. {decision: "APPROVE"}) — never a
