@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import axios from "axios";
+import { CheckCircle2, ShieldCheck, XCircle } from "lucide-react";
 import { getCRL, getCertificateByUserId, revokeCertificate } from "../api/certificates";
 import {
   verifyAuditChain,
@@ -9,8 +10,14 @@ import {
   type AuditChainHead,
 } from "../api/audit";
 import { Card } from "../components/Card";
-import { ErrorState, LoadingState, EmptyState } from "../components/States";
+import { ErrorState, EmptyState } from "../components/States";
 import { UserPicker } from "../components/UserPicker";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Button } from "../components/ui/Button";
+import { Banner } from "../components/ui/Banner";
+import { Field, fieldInputClasses } from "../components/ui/Field";
+import { CopyButton } from "../components/ui/CopyButton";
+import { SkeletonTableRows } from "../components/ui/Skeleton";
 import { ROLE_LABELS } from "../lib/roleHome";
 import type { RevokedCertificateSummary, UserSummary } from "../types";
 
@@ -109,120 +116,126 @@ export function AdminDashboard() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="font-serif text-2xl font-semibold text-ink">Admin — Certificate Authority</h1>
-        <p className="mt-1 text-sm text-muted">
-          Revoke a compromised or retired certificate, and review the Certificate Revocation List (CRL).
-          Revoking takes effect immediately across every signing and verification path.
-        </p>
-      </div>
+      <PageHeader
+        title="Admin — Certificate Authority"
+        subtitle="Revoke a compromised or retired certificate, and review the Certificate Revocation List (CRL). Revoking takes effect immediately across every signing and verification path."
+      />
 
       <Card>
-        <h2 className="font-serif text-lg font-semibold text-ink">Revoke a certificate</h2>
+        <h2 className="text-lg font-semibold text-slate-900">Revoke a certificate</h2>
         <form onSubmit={handleRevoke} className="mt-4 flex flex-col gap-4">
-          <label className="flex flex-col gap-1">
-            <span className="text-sm font-medium text-ink">User</span>
+          <Field label="User">
             <UserPicker selected={targetUser} onSelect={setTargetUser} placeholder="Search by name…" />
-          </label>
+          </Field>
 
-          <label className="flex flex-col gap-1">
-            <span className="text-sm font-medium text-ink">Reason</span>
+          <Field label="Reason">
             <input
               type="text"
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               placeholder="e.g. Private key compromised"
-              className="rounded-md border border-border-subtle px-3 py-2 text-sm outline-none focus:border-camel focus:ring-1 focus:ring-camel"
+              className={fieldInputClasses}
             />
-          </label>
+          </Field>
 
-          {formError && <ErrorState label={formError} />}
-          {successMessage && (
-            <p className="rounded-md bg-valid-chip px-3 py-2 text-sm text-dark-cocoa">{successMessage}</p>
-          )}
+          {formError && <Banner variant="danger">{formError}</Banner>}
+          {successMessage && <Banner variant="success">{successMessage}</Banner>}
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="self-start rounded-md bg-coffee px-4 py-2 text-sm font-semibold text-apricot hover:bg-coffee-hover disabled:cursor-not-allowed disabled:opacity-60"
-          >
+          <Button type="submit" loading={submitting} className="self-start">
             {submitting ? "Revoking…" : "Revoke Certificate"}
-          </button>
+          </Button>
         </form>
       </Card>
 
       <Card>
-        <h2 className="font-serif text-lg font-semibold text-ink">Certificate Revocation List (CRL)</h2>
-        <p className="mt-1 text-sm text-muted">Every certificate revoked so far, most recent first.</p>
+        <h2 className="text-lg font-semibold text-slate-900">Certificate Revocation List (CRL)</h2>
+        <p className="mt-1 text-sm text-slate-600">Every certificate revoked so far, most recent first.</p>
 
         <div className="mt-4">
           {crlError && <ErrorState label={crlError} />}
-          {!crlError && crl === null && <LoadingState />}
           {!crlError && crl !== null && crl.length === 0 && (
             <EmptyState label="No certificates have been revoked." />
           )}
-          {!crlError && crl !== null && crl.length > 0 && (
-            <table className="w-full text-left text-sm">
-              <thead>
-                <tr className="border-b border-border-subtle text-xs uppercase tracking-wide text-muted">
-                  <th className="pb-2 pr-4">Subject</th>
-                  <th className="pb-2 pr-4">Role</th>
-                  <th className="pb-2 pr-4">Fingerprint</th>
-                  <th className="pb-2 pr-4">Revoked at</th>
-                  <th className="pb-2">Reason</th>
-                </tr>
-              </thead>
-              <tbody>
-                {crl.map((entry) => (
-                  <tr key={entry.certificateId} className="border-b border-border-subtle last:border-0">
-                    <td className="py-2 pr-4 text-ink">{entry.subjectName}</td>
-                    <td className="py-2 pr-4 text-muted">{ROLE_LABELS[entry.role]}</td>
-                    <td className="py-2 pr-4 font-mono text-xs text-muted">{entry.fingerprint.slice(0, 16)}…</td>
-                    <td className="py-2 pr-4 text-muted">{new Date(entry.revokedAt).toLocaleString()}</td>
-                    <td className="py-2 text-muted">{entry.revokedReason ?? "—"}</td>
+          {!crlError && (crl === null || crl.length > 0) && (
+            <div className="overflow-x-auto rounded-lg border border-slate-200">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 bg-slate-50 text-xs font-medium uppercase tracking-wide text-slate-600">
+                    <th className="px-4 py-2.5">Subject</th>
+                    <th className="px-4 py-2.5">Role</th>
+                    <th className="px-4 py-2.5">Fingerprint</th>
+                    <th className="px-4 py-2.5">Revoked at</th>
+                    <th className="px-4 py-2.5">Reason</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {crl === null && <SkeletonTableRows rows={3} columns={5} />}
+                  {crl?.map((entry) => (
+                    <tr key={entry.certificateId} className="border-b border-slate-100 last:border-0">
+                      <td className="px-4 py-2.5 text-slate-900">{entry.subjectName}</td>
+                      <td className="px-4 py-2.5 text-slate-600">{ROLE_LABELS[entry.role]}</td>
+                      <td className="px-4 py-2.5 font-mono text-xs text-slate-500">{entry.fingerprint.slice(0, 16)}…</td>
+                      <td className="px-4 py-2.5 text-slate-600">{new Date(entry.revokedAt).toLocaleString()}</td>
+                      <td className="px-4 py-2.5 text-slate-600">{entry.revokedReason ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       </Card>
 
       <Card>
-        <h2 className="font-serif text-lg font-semibold text-ink">Verify audit chain integrity</h2>
-        <p className="mt-1 text-sm text-muted">
+        <h2 className="text-lg font-semibold text-slate-900">Verify audit chain integrity</h2>
+        <p className="mt-1 text-sm text-slate-600">
           Recomputes every audit log entry's hash and checks its link to the previous entry — a
           tamper anywhere in the chain (edited or deleted row) is reported as the first broken
           sequence number, not just "something's wrong."
         </p>
 
-        <button
-          type="button"
-          onClick={handleVerifyIntegrity}
-          disabled={auditChecking}
-          className="mt-4 self-start rounded-md bg-coffee px-4 py-2 text-sm font-semibold text-apricot hover:bg-coffee-hover disabled:cursor-not-allowed disabled:opacity-60"
-        >
+        <Button onClick={handleVerifyIntegrity} loading={auditChecking} icon={<ShieldCheck className="h-4 w-4" aria-hidden="true" />} className="mt-4 self-start">
           {auditChecking ? "Verifying…" : "Verify integrity"}
-        </button>
+        </Button>
 
-        {auditError && <ErrorState label={auditError} />}
+        {auditError && (
+          <div className="mt-4">
+            <ErrorState label={auditError} />
+          </div>
+        )}
 
         {auditResult && (
-          <div className="mt-4 flex flex-col gap-2 text-sm">
-            <p className={auditResult.valid ? "text-dark-cocoa" : "text-wax-seal"}>
-              <span className="font-semibold">{auditResult.valid ? "Chain intact." : "Chain broken."}</span>{" "}
+          <div
+            className={`mt-4 rounded-xl border p-4 ${
+              auditResult.valid ? "border-green-200 bg-green-50" : "border-red-200 bg-red-50"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {auditResult.valid ? (
+                <CheckCircle2 className="h-5 w-5 text-green-600" aria-hidden="true" />
+              ) : (
+                <XCircle className="h-5 w-5 text-red-600" aria-hidden="true" />
+              )}
+              <span className={`text-sm font-semibold ${auditResult.valid ? "text-green-800" : "text-red-700"}`}>
+                {auditResult.valid ? "Chain valid" : `Chain broken at seq ${auditResult.firstBrokenSeq}`}
+              </span>
+            </div>
+            <p className={`mt-1 text-sm ${auditResult.valid ? "text-green-700" : "text-red-700"}`}>
               {auditResult.valid
                 ? `All ${auditResult.checked} entries verified.`
-                : `${auditResult.checked} entries verified before the break at seq ${auditResult.firstBrokenSeq}: ${auditResult.reason}`}
+                : `${auditResult.checked} entries verified before the break: ${auditResult.reason}`}
             </p>
             {auditEntryCount !== null && (
-              <p className="text-muted">Total entries in the log: {auditEntryCount}</p>
+              <p className="mt-2 text-sm text-slate-600">Total entries in the log: {auditEntryCount}</p>
             )}
             {auditHead?.hash && (
-              <p className="break-all text-muted">
-                Head: seq {auditHead.seq} —{" "}
-                <span className="font-mono text-xs">{auditHead.hash}</span>
-              </p>
+              <div className="mt-2 flex items-center gap-2">
+                <span className="text-sm text-slate-600">Head: seq {auditHead.seq} —</span>
+                <span className="truncate font-mono text-xs text-slate-700" title={auditHead.hash}>
+                  {auditHead.hash}
+                </span>
+                <CopyButton value={auditHead.hash} label="Copy head hash" />
+              </div>
             )}
           </div>
         )}

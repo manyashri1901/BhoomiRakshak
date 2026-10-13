@@ -34,10 +34,14 @@ export interface UserSummary {
 
 // The actor embedded in a signature is deliberately narrowed server-side —
 // never passwordHash or wrapped key material, only what verification/display need.
+// `certificate` was already present in the JSON returned by GET /pending-vo
+// and GET /pending-registrar (see routes/transactions.ts's
+// transactionWithChain) — just not previously declared here.
 export interface ActorSummary {
   id: string;
   name: string;
   publicKey: string;
+  certificate: { fingerprint: string } | null;
 }
 
 export interface SignatureWithActor {

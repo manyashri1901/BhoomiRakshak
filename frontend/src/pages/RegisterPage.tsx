@@ -3,6 +3,9 @@ import { Link, useNavigate } from "react-router-dom";
 import axios from "axios";
 import { useAuth } from "../context/AuthContext";
 import { ROLE_LABELS } from "../lib/roleHome";
+import { Field, fieldInputClasses } from "../components/ui/Field";
+import { Button } from "../components/ui/Button";
+import { Banner } from "../components/ui/Banner";
 import type { Role } from "../types";
 
 const ROLES: Role[] = ["LANDOWNER", "VILLAGE_OFFICER", "REGISTRAR"];
@@ -38,9 +41,9 @@ export function RegisterPage() {
 
   return (
     <div className="mx-auto max-w-sm">
-      <div className="rounded-lg border border-border-subtle bg-surface px-8 py-10 shadow-sm">
-        <h1 className="font-serif text-2xl font-semibold text-ink">Create an account</h1>
-        <p className="mt-1 text-sm text-muted">
+      <div className="rounded-xl border border-slate-200 bg-white px-8 py-10 shadow-sm">
+        <h1 className="text-2xl font-semibold text-slate-900">Create an account</h1>
+        <p className="mt-1 text-sm text-slate-600">
           Registration generates your signing key pair in this browser and issues a CA-signed
           certificate — your private key is encrypted with your password and never leaves your
           device unencrypted. There is no password reset: if you forget it, your key is
@@ -48,32 +51,29 @@ export function RegisterPage() {
         </p>
 
         <form onSubmit={handleSubmit} className="mt-6 flex flex-col gap-4">
-          <label className="flex flex-col gap-1">
-            <span className="text-sm font-medium text-ink">Full name</span>
+          <Field label="Full name">
             <input
               type="text"
               required
               autoComplete="name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="rounded-md border border-border-subtle px-3 py-2 text-sm outline-none focus:border-camel focus:ring-1 focus:ring-camel"
+              className={fieldInputClasses}
             />
-          </label>
+          </Field>
 
-          <label className="flex flex-col gap-1">
-            <span className="text-sm font-medium text-ink">Email</span>
+          <Field label="Email">
             <input
               type="email"
               required
               autoComplete="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="rounded-md border border-border-subtle px-3 py-2 text-sm outline-none focus:border-camel focus:ring-1 focus:ring-camel"
+              className={fieldInputClasses}
             />
-          </label>
+          </Field>
 
-          <label className="flex flex-col gap-1">
-            <span className="text-sm font-medium text-ink">Password</span>
+          <Field label="Password" helperText="At least 10 characters.">
             <input
               type="password"
               required
@@ -81,17 +81,15 @@ export function RegisterPage() {
               autoComplete="new-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="rounded-md border border-border-subtle px-3 py-2 text-sm outline-none focus:border-camel focus:ring-1 focus:ring-camel"
+              className={fieldInputClasses}
             />
-            <span className="text-xs text-muted">At least 10 characters.</span>
-          </label>
+          </Field>
 
-          <label className="flex flex-col gap-1">
-            <span className="text-sm font-medium text-ink">Role</span>
+          <Field label="Role">
             <select
               value={role}
               onChange={(e) => setRole(e.target.value as Role)}
-              className="rounded-md border border-border-subtle bg-surface px-3 py-2 text-sm outline-none focus:border-camel focus:ring-1 focus:ring-camel"
+              className={fieldInputClasses}
             >
               {ROLES.map((r) => (
                 <option key={r} value={r}>
@@ -99,24 +97,18 @@ export function RegisterPage() {
                 </option>
               ))}
             </select>
-          </label>
+          </Field>
 
-          {error && (
-            <p className="rounded-md bg-danger-chip px-3 py-2 text-sm text-wax-seal">{error}</p>
-          )}
+          {error && <Banner variant="danger">{error}</Banner>}
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="mt-2 rounded-md bg-coffee px-4 py-2 text-sm font-semibold text-apricot transition-colors hover:bg-coffee-hover disabled:cursor-not-allowed disabled:opacity-60"
-          >
+          <Button type="submit" loading={submitting} className="mt-2 w-full">
             {submitting ? "Creating account…" : "Register"}
-          </button>
+          </Button>
         </form>
 
-        <p className="mt-6 text-center text-sm text-muted">
+        <p className="mt-6 text-center text-sm text-slate-600">
           Already registered?{" "}
-          <Link to="/login" className="font-medium text-ink underline">
+          <Link to="/login" className="font-medium text-navy underline">
             Sign in
           </Link>
         </p>

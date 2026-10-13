@@ -1,5 +1,8 @@
 import { useState, type FormEvent } from "react";
-import { ErrorState } from "./States";
+import { Lock } from "lucide-react";
+import { Banner } from "./ui/Banner";
+import { Button } from "./ui/Button";
+import { Field, fieldInputClasses } from "./ui/Field";
 
 interface PasswordPromptProps {
   open: boolean;
@@ -52,45 +55,37 @@ export function PasswordPrompt({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 px-4">
-      <div className="w-full max-w-sm rounded-lg border border-border-subtle bg-surface p-6 shadow-lg">
-        <h2 className="font-serif text-lg font-semibold text-ink">{title}</h2>
-        <p className="mt-1 text-sm text-muted">{description}</p>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4 backdrop-blur-sm">
+      <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-6 shadow-lg">
+        <div className="flex items-center gap-2">
+          <div className="flex h-9 w-9 items-center justify-center rounded-full bg-navy/10 text-navy">
+            <Lock className="h-4.5 w-4.5" aria-hidden="true" />
+          </div>
+          <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
+        </div>
+        <p className="mt-2 text-sm text-slate-600">{description}</p>
 
         <form onSubmit={handleSubmit} className="mt-4 flex flex-col gap-3">
-          <label className="flex flex-col gap-1">
-            <span className="text-sm font-medium text-ink">Password</span>
+          <Field label="Password" helperText="Used locally to unlock your signing key — never sent to the server.">
             <input
               type="password"
               autoFocus
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="rounded-md border border-border-subtle px-3 py-2 text-sm outline-none focus:border-camel focus:ring-1 focus:ring-camel"
+              className={fieldInputClasses}
             />
-            <span className="text-xs text-muted">
-              Used locally to unlock your signing key — never sent to the server.
-            </span>
-          </label>
+          </Field>
 
-          {error && <ErrorState label={error} />}
+          {error && <Banner variant="danger">{error}</Banner>}
 
           <div className="mt-1 flex gap-3">
-            <button
-              type="submit"
-              disabled={submitting}
-              className="rounded-md bg-coffee px-4 py-2 text-sm font-semibold text-apricot hover:bg-coffee-hover disabled:cursor-not-allowed disabled:opacity-60"
-            >
+            <Button type="submit" loading={submitting}>
               {submitting ? "Signing…" : confirmLabel}
-            </button>
-            <button
-              type="button"
-              onClick={handleCancel}
-              disabled={submitting}
-              className="rounded-md border border-border-subtle px-4 py-2 text-sm font-medium text-ink hover:bg-neutral-chip disabled:cursor-not-allowed disabled:opacity-60"
-            >
+            </Button>
+            <Button type="button" variant="secondary" onClick={handleCancel} disabled={submitting}>
               Cancel
-            </button>
+            </Button>
           </div>
         </form>
       </div>

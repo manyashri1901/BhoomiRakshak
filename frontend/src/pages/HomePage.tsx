@@ -1,49 +1,60 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { RoyalSeal } from "../components/RoyalSeal";
-import { ArchFrame } from "../components/ArchFrame";
-import { JaliPattern } from "../components/JaliPattern";
-import { CarvedDivider } from "../components/CarvedDivider";
+import {
+  ClipboardCheck,
+  FileSignature,
+  Hash,
+  Link2,
+  Stamp,
+  UserCheck,
+} from "lucide-react";
+
+const FEATURES = [
+  {
+    icon: UserCheck,
+    title: "Verified digital identity",
+    description: "Every user holds a browser-generated RSA key pair and a CA-issued certificate.",
+  },
+  {
+    icon: FileSignature,
+    title: "Signed transactions",
+    description: "Every registration, transfer, and update is signed by the acting party, not just recorded.",
+  },
+  {
+    icon: Hash,
+    title: "SHA-256 integrity",
+    description: "Every supporting document's hash is independently recomputed from disk on demand.",
+  },
+  {
+    icon: Link2,
+    title: "Tamper-evident audit chain",
+    description: "A hash-chained audit log makes any after-the-fact edit mathematically detectable.",
+  },
+];
 
 const STEPS = [
   {
-    number: "01",
-    title: "Landowner submits",
-    description:
-      "The landowner uploads a supporting document and signs the transaction with their own private key.",
+    icon: UserCheck,
+    title: "Landowner submits and signs",
+    description: "Uploads a supporting document and signs the transaction with their own private key.",
   },
   {
-    number: "02",
-    title: "Village Officer verifies",
-    description:
-      "The Village Officer checks the landowner's signature and the document itself before co-signing.",
+    icon: ClipboardCheck,
+    title: "Village Officer verifies and signs",
+    description: "Checks the landowner's signature and the document itself before co-signing.",
   },
   {
-    number: "03",
-    title: "Registrar approves and finalizes",
-    description:
-      "The Registrar verifies the full signature chain, then finalizes the record — updating ownership where it applies.",
+    icon: Stamp,
+    title: "Registrar approves and signs",
+    description: "Verifies the full signature chain, then finalizes the record.",
   },
 ];
 
-// One word per staggered <span> — the ink-settling headline effect. Each
-// entry's delay is baked in here (not computed from index*N) so the two
-// lines can have their own pacing rather than one flat cadence.
-const HEADLINE_LINE_1 = [
-  { text: "Every", delay: 100 },
-  { text: "land", delay: 160 },
-  { text: "record,", delay: 220 },
-  { text: "signed.", delay: 280 },
-];
-const HEADLINE_LINE_2 = [
-  { text: "Every", delay: 340 },
-  { text: "signature,", delay: 400 },
-  { text: "verified.", delay: 460 },
-];
-
-// Module-level, not component state: resets only on an actual page
-// reload (fresh module evaluation), and stays true across client-side
-// navigation back to "/" within the same load — e.g. after logging out.
+// Animation-gated the same way the previous design was: decided once,
+// synchronously, on first render — skipped for prefers-reduced-motion —
+// so there's never a "hidden by default" state a slow/failed animation
+// could get stuck in. Every element below is plain static content without
+// the `.animate-fade-in-up` class.
 let heroAnimationPlayed = false;
 
 function shouldPlayHeroAnimation(): boolean {
@@ -54,100 +65,66 @@ function shouldPlayHeroAnimation(): boolean {
 }
 
 export function HomePage() {
-  // Lazy initializer runs synchronously during the first render, before
-  // paint — so there's no flash between "static" and "about to animate"
-  // states, and no useEffect needed to decide this.
   const [animate] = useState(shouldPlayHeroAnimation);
+  const animateClass = animate ? "animate-fade-in-up" : "";
 
   return (
-    <div className={`flex flex-col gap-14 ${animate ? "hero-animate" : ""}`}>
-      <section className="relative overflow-hidden">
-        <div className="hero-bg-layer pointer-events-none absolute inset-0">
-          <JaliPattern />
-          {/* vignette — an old document catching the light */}
-          <div
-            className="absolute inset-0"
-            style={{
-              background:
-                "radial-gradient(ellipse at center, transparent 55%, rgba(70,32,18,0.10) 100%)",
-            }}
-          />
-        </div>
-
-        <div className="relative z-10 flex flex-col items-center gap-5 pt-6 pb-4 text-center">
-          {/* The arch frames only the seal + headline — sized to that
-              block specifically, not the sub-line/caption/CTAs below it,
-              so its curve never runs behind body text. */}
-          <div className="relative flex w-full max-w-2xl flex-col items-center pt-8 pb-10">
-            <ArchFrame className="pointer-events-none absolute inset-0 -z-10 h-full w-full" />
-            <RoyalSeal className="hero-seal h-24 w-24" />
-            <h1 className="mt-5 w-full max-w-2xl font-serif text-2xl font-semibold text-ink sm:text-4xl md:text-5xl">
-              {HEADLINE_LINE_1.map(({ text, delay }, i) => (
-                <span key={text + delay}>
-                  {i > 0 && " "}
-                  <span className="hero-word" style={{ animationDelay: `${delay}ms` }}>
-                    {text}
-                  </span>
-                </span>
-              ))}
-              <br className="hidden sm:block" />
-              {" "}
-              {HEADLINE_LINE_2.map(({ text, delay }, i) => (
-                <span key={text + delay}>
-                  {i > 0 && " "}
-                  <span className="hero-word" style={{ animationDelay: `${delay}ms` }}>
-                    {text}
-                  </span>
-                </span>
-              ))}
-            </h1>
-          </div>
-
-          <p className="hero-stagger hero-stagger-1 max-w-2xl text-base text-ink">
-            Each user holds a PKI-backed digital identity, every transaction is digitally signed,
-            and the full history stays tamper-evident — built to complement systems like DILRMP,
-            not replace them.
-          </p>
-
-          <p className="hero-stagger hero-stagger-2 max-w-xl text-sm italic text-muted">
-            In the spirit of the sealed land grants of old — verified, permanent, and true.
-          </p>
-
-          <div className="hero-stagger hero-stagger-4 mt-3 flex flex-wrap items-center justify-center gap-4">
-            <Link
-              to="/login"
-              className="rounded-md bg-coffee px-6 py-2.5 text-sm font-semibold text-apricot hover:bg-coffee-hover focus-visible:outline-2 focus-visible:-outline-offset-4 focus-visible:outline-apricot"
-            >
-              Log In
-            </Link>
-            <Link
-              to="/register"
-              className="rounded-md border border-camel px-6 py-2.5 text-sm font-semibold text-ink hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-coffee"
-            >
-              Register
-            </Link>
-          </div>
+    <div className="flex flex-col gap-16">
+      <section className="flex flex-col items-center gap-5 pt-8 pb-4 text-center">
+        <h1 className={`max-w-3xl text-[32px] font-semibold leading-tight text-slate-900 sm:text-5xl ${animateClass}`}>
+          Every land record, signed. Every signature, tamper-evident.
+        </h1>
+        <p className={`max-w-2xl text-base text-slate-600 ${animateClass}`}>
+          A PKI-backed land registry where every transaction is cryptographically signed and every
+          record stays independently verifiable, end to end.
+        </p>
+        <div className={`mt-2 flex flex-wrap items-center justify-center gap-3 ${animateClass}`}>
+          <Link
+            to="/register"
+            className="rounded-lg bg-navy px-6 py-2.5 text-sm font-semibold text-white hover:bg-navy-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-navy"
+          >
+            Get started
+          </Link>
+          <a
+            href="#how-it-works"
+            className="rounded-lg border border-slate-300 px-6 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-navy"
+          >
+            How it works
+          </a>
         </div>
       </section>
 
-      <CarvedDivider />
+      <section>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {FEATURES.map(({ icon: Icon, title, description }) => (
+            <div key={title} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-teal/10 text-teal">
+                <Icon className="h-5 w-5" aria-hidden="true" />
+              </div>
+              <h3 className="mt-3 text-base font-semibold text-slate-900">{title}</h3>
+              <p className="mt-1 text-sm text-slate-600">{description}</p>
+            </div>
+          ))}
+        </div>
+      </section>
 
-      <section className="hero-stagger hero-stagger-3">
-        <h2 className="text-center font-serif text-2xl font-semibold text-ink">How it works</h2>
-        <p className="mx-auto mt-2 max-w-xl text-center text-sm text-muted">
+      <section id="how-it-works" className="scroll-mt-20">
+        <h2 className="text-center text-xl font-semibold text-slate-900 sm:text-2xl">How it works</h2>
+        <p className="mx-auto mt-2 max-w-xl text-center text-sm text-slate-600">
           One transaction, three signatures — a real ordered approval chain, not a formality.
         </p>
 
-        <div className="mt-10 grid grid-cols-1 gap-6 md:grid-cols-3">
-          {STEPS.map((step) => (
-            <div
-              key={step.number}
-              className="rounded-lg border border-border-subtle bg-surface p-6"
-            >
-              <div className="font-serif text-3xl font-semibold text-ink">{step.number}</div>
-              <div className="mt-2 h-px w-10 bg-camel" aria-hidden="true" />
-              <h3 className="mt-3 font-serif text-lg font-semibold text-ink">{step.title}</h3>
-              <p className="mt-1 text-sm text-muted">{step.description}</p>
+        <div className="mt-8 grid grid-cols-1 gap-6 md:grid-cols-3">
+          {STEPS.map(({ icon: Icon, title, description }, i) => (
+            <div key={title} className="relative rounded-xl border border-slate-200 bg-white p-6">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-navy/10 text-navy">
+                <Icon className="h-5 w-5" aria-hidden="true" />
+              </div>
+              <div className="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                Step {i + 1}
+              </div>
+              <h3 className="mt-1 text-base font-semibold text-slate-900">{title}</h3>
+              <p className="mt-1 text-sm text-slate-600">{description}</p>
             </div>
           ))}
         </div>
