@@ -176,7 +176,11 @@ pooled connection string into `DATABASE_URL`.
 ### 2. API — Render (Docker)
 
 1. Push this repo (with the root `Dockerfile`) to GitHub, then create a new
-   Render **Web Service** from it, environment "Docker".
+   Render **Web Service** from it, environment "Docker". Set the **Health
+   Check Path** to `/health` — it's unauthenticated, does a 3-second-capped
+   `SELECT 1` against the database, and returns 200 `{"status":"ok","db":"up","uptime":<seconds>}`
+   or 503 `{"status":"degraded","db":"down"}` (no version info, env values,
+   or error detail in the response either way).
 2. Set the environment variables below (Render's dashboard → Environment).
    Mark `JWT_SECRET`, `ADMIN_PASSWORD`, and the two `CA_*_BASE64` vars as
    **Secrets**, not plain env vars.

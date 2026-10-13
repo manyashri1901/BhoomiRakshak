@@ -14,6 +14,7 @@ import usersRouter from "./routes/users.ts";
 import auditRouter from "./routes/audit.ts";
 import devRouter from "./routes/dev.ts";
 import { requireAuth, requireRole } from "./middleware/auth.ts";
+import { prisma } from "./lib/prisma.ts";
 
 const app = express();
 
@@ -51,6 +52,28 @@ app.use(
   }),
 );
 app.use(express.json());
+
+// Unauthenticated, unrated-limited liveness/readiness check for the
+// hosting platform (e.g. Render's health-check path) — mounted before
+// every router below, so it never passes through requireAuth or any
+// route's rate limiter. Deliberately returns nothing beyond up/down: no
+// version string, no env values, no error detail, nothing an
+// unauthenticated prober shouldn't see.
+const HEALTH_CHECK_TIMEOUT_MS = 3_000;
+app.get("/health", async (_req: Request, res: Response) => {
+  try {
+    await Promise.race([
+      prisma.$queryRaw`SELECT 1`,
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error("Health check DB query timed out")), HEALTH_CHECK_TIMEOUT_MS),
+      ),
+    ]);
+    res.status(200).json({ status: "ok", db: "up", uptime: process.uptime() });
+  } catch (err: unknown) {
+    console.error("Health check failed:", err);
+    res.status(503).json({ status: "degraded", db: "down" });
+  }
+});
 
 app.use("/api/auth", authRouter);
 app.use("/api/documents", documentsRouter);
