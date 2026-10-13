@@ -53,24 +53,36 @@ app.use(
 );
 app.use(express.json());
 
-// Unauthenticated, unrated-limited liveness/readiness check for the
-// hosting platform (e.g. Render's health-check path) — mounted before
-// every router below, so it never passes through requireAuth or any
-// route's rate limiter. Deliberately returns nothing beyond up/down: no
-// version string, no env values, no error detail, nothing an
-// unauthenticated prober shouldn't see.
-const HEALTH_CHECK_TIMEOUT_MS = 3_000;
-app.get("/health", async (_req: Request, res: Response) => {
+// Unauthenticated, unrated-limited health endpoints for the hosting
+// platform — mounted before every router below, so neither passes through
+// requireAuth or any route's rate limiter. Both deliberately return
+// nothing beyond up/down: no version string, no env values, no error
+// detail, nothing an unauthenticated prober shouldn't see.
+
+// Pure liveness check: is the process up and able to answer HTTP at all.
+// No DB call, so it can't be slow or degraded by Neon being asleep — this
+// is what Render's own health check should poll.
+app.get("/health", (_req: Request, res: Response) => {
+  res.status(200).json({ status: "ok", uptime: process.uptime() });
+});
+
+// Readiness/dependency check: can this process actually reach the
+// database. Separate from /health so a cold/sleeping Neon branch (see
+// README) never makes Render think the process itself is down and
+// restart it — this is for the post-deploy smoke test and manual
+// checks, not for Render's own health check.
+const HEALTH_DB_CHECK_TIMEOUT_MS = 8_000;
+app.get("/health/db", async (_req: Request, res: Response) => {
   try {
     await Promise.race([
       prisma.$queryRaw`SELECT 1`,
       new Promise((_resolve, reject) =>
-        setTimeout(() => reject(new Error("Health check DB query timed out")), HEALTH_CHECK_TIMEOUT_MS),
+        setTimeout(() => reject(new Error("Health check DB query timed out")), HEALTH_DB_CHECK_TIMEOUT_MS),
       ),
     ]);
-    res.status(200).json({ status: "ok", db: "up", uptime: process.uptime() });
+    res.status(200).json({ status: "ok", db: "up" });
   } catch (err: unknown) {
-    console.error("Health check failed:", err);
+    console.error("DB health check failed:", err);
     res.status(503).json({ status: "degraded", db: "down" });
   }
 });

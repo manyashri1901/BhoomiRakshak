@@ -177,10 +177,17 @@ pooled connection string into `DATABASE_URL`.
 
 1. Push this repo (with the root `Dockerfile`) to GitHub, then create a new
    Render **Web Service** from it, environment "Docker". Set the **Health
-   Check Path** to `/health` — it's unauthenticated, does a 3-second-capped
-   `SELECT 1` against the database, and returns 200 `{"status":"ok","db":"up","uptime":<seconds>}`
-   or 503 `{"status":"degraded","db":"down"}` (no version info, env values,
-   or error detail in the response either way).
+   Check Path** to `/health` — a pure liveness check (no DB call, always
+   200 `{"status":"ok","uptime":<seconds>}`), so a cold/sleeping Neon
+   branch never makes Render think the process itself is down and restart
+   it. There's a separate `GET /health/db` for the post-deploy smoke test
+   and manual checks — it runs an 8-second-capped `SELECT 1` against the
+   database and returns 200 `{"status":"ok","db":"up"}` or 503
+   `{"status":"degraded","db":"down"}`. Both are unauthenticated and return
+   nothing else (no version info, env values, or error detail). Note: the
+   first call to `/health/db` after the database has been idle can take a
+   few seconds while Neon wakes the branch back up — that's expected, not
+   a fault.
 2. Set the environment variables below (Render's dashboard → Environment).
    Mark `JWT_SECRET`, `ADMIN_PASSWORD`, and the two `CA_*_BASE64` vars as
    **Secrets**, not plain env vars.
