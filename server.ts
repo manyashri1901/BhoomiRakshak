@@ -47,7 +47,7 @@ app.use(helmet());
 // Authorization header, not cookies, so no credentials flag is needed.
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL ?? "http://localhost:5173",
+    origin: process.env.FRONTEND_ORIGIN ?? "http://localhost:5173",
   }),
 );
 app.use(express.json());

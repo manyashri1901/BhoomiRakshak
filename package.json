@@ -2,7 +2,10 @@
   "type": "module",
   "scripts": {
     "dev": "node server.ts",
-    "bootstrap-admin": "node scripts/create-first-admin.ts"
+    "bootstrap-admin": "node scripts/create-first-admin.ts",
+    "first-run": "node scripts/first-run.ts",
+    "test": "node --test \"test/*.test.ts\"",
+    "attack-sim": "node scripts/attack-simulation.ts"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",

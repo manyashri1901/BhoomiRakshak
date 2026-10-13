@@ -70,8 +70,13 @@ function generateRsaKeyPair(): KeyPairPem {
   return { publicKey, privateKey };
 }
 
+function decodeBase64Pem(value: string): string {
+  return Buffer.from(value, "base64").toString("utf8");
+}
+
 /**
- * Loads the root CA key pair from disk, generating it on first run.
+ * Loads the root CA key pair — from environment variables first, falling
+ * back to disk (generating it on first run) only if those aren't set.
  *
  * This is the CA's own identity: every certificate issued by
  * issueCertificate() is signed with `privateKey`, and every verification in
@@ -79,9 +84,30 @@ function generateRsaKeyPair(): KeyPairPem {
  * means losing the ability to issue new trusted certificates; leaking it
  * means an attacker could forge certificates, so keys/ must never be
  * committed to git (see .gitignore).
+ *
+ * CA_PRIVATE_KEY_BASE64 / CA_PUBLIC_KEY_BASE64 (base64 of the PEM text, to
+ * sidestep every platform's own quirks around multi-line env var values)
+ * exist for Render and similar hosts, whose disk is ephemeral — a key
+ * generated to keys/ on one deploy would vanish on the next, invalidating
+ * every certificate issued under it. Store these as the platform's
+ * *secret* env vars, never plain ones, and never log their values (see
+ * scripts/first-run.ts, the only place that ever prints them, once, for
+ * you to copy into that secret store). Local development has no such
+ * constraint, so it's untouched: no env vars set, keys/ persists on disk
+ * exactly as before.
  */
 export function ensureRootCA(): KeyPairPem {
   if (cachedRootCA) return cachedRootCA;
+
+  const envPrivateKey = process.env.CA_PRIVATE_KEY_BASE64;
+  const envPublicKey = process.env.CA_PUBLIC_KEY_BASE64;
+  if (envPrivateKey && envPublicKey) {
+    cachedRootCA = {
+      privateKey: decodeBase64Pem(envPrivateKey),
+      publicKey: decodeBase64Pem(envPublicKey),
+    };
+    return cachedRootCA;
+  }
 
   const alreadyExists =
     fs.existsSync(CA_PRIVATE_KEY_PATH) && fs.existsSync(CA_PUBLIC_KEY_PATH);
