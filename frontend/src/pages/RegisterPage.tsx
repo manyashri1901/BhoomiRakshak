@@ -77,13 +77,13 @@ export function RegisterPage() {
             <input
               type="password"
               required
-              minLength={8}
+              minLength={10}
               autoComplete="new-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="rounded-md border border-border-subtle px-3 py-2 text-sm outline-none focus:border-camel focus:ring-1 focus:ring-camel"
             />
-            <span className="text-xs text-muted">At least 8 characters.</span>
+            <span className="text-xs text-muted">At least 10 characters.</span>
           </label>
 
           <label className="flex flex-col gap-1">

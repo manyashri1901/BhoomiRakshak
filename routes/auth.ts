@@ -59,8 +59,8 @@ router.post("/register", registerRateLimiter, async (req, res) => {
     res.status(400).json({ error: "email is required" });
     return;
   }
-  if (typeof password !== "string" || password.length < 8) {
-    res.status(400).json({ error: "password must be at least 8 characters" });
+  if (typeof password !== "string" || password.length < 10) {
+    res.status(400).json({ error: "password must be at least 10 characters" });
     return;
   }
   if (typeof role !== "string" || !VALID_ROLES.includes(role as Role)) {
