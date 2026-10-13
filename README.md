@@ -79,10 +79,14 @@ routes/              One file per resource — auth, documents, land-records,
 prisma/schema.prisma Data model; prisma/migrations/ — migration history
 keys/                CA root key pair (generated on first run; gitignored)
 uploads/             Uploaded transaction documents (gitignored)
-scripts/             CA demo, admin bootstrap, and crypto/signing test scripts
+scripts/             CA demo, admin bootstrap, first-run, attack simulation,
+                     and crypto/signing test scripts
+test/                node --test unit tests (canonicalize, signing, certificate)
 frontend/            Vite React app — src/pages, src/components, src/api;
                      src/lib/clientCrypto.ts (Web Crypto key handling),
                      src/lib/signAndSubmit.ts (prepare -> sign -> submit)
+Dockerfile           Multi-stage build for the API (see "Deploying" below)
+.env.example         Full list of environment variables with descriptions
 ```
 
 ## Setup
@@ -98,28 +102,28 @@ frontend/            Vite React app — src/pages, src/components, src/api;
 npm install
 ```
 
-Create `.env` in the project root:
+Copy `.env.example` to `.env` and fill in at least `DATABASE_URL` and
+`JWT_SECRET` (see `.env.example` for how to generate a `JWT_SECRET`, and
+for what every other variable does).
+
+Apply migrations, generate the CA root key pair, and create the first
+ADMIN account in one step (set `ADMIN_NAME`/`ADMIN_EMAIL`/`ADMIN_PASSWORD`
+in `.env` first if you want the admin account created now — it's safe to
+run this again later without them set, or a second time at all):
 
 ```bash
-DATABASE_URL="postgresql://user:password@host/db?sslmode=require"
-JWT_SECRET="<a long random string>"   # e.g. `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"`
+npm run first-run
 ```
 
-Run the migration to create all tables:
-
-```bash
-npx prisma migrate dev
-```
+(Equivalently, run `npx prisma migrate dev` and
+`npm run bootstrap-admin` separately — `first-run` just wraps both plus the
+CA key step into one idempotent command.)
 
 Start the API (port 4000 by default; override with `PORT`):
 
 ```bash
 npm run dev
 ```
-
-On first request that touches the CA, `keys/ca-private.pem` and
-`keys/ca-public.pem` are generated automatically if they don't already
-exist.
 
 ### Frontend
 
@@ -144,6 +148,99 @@ Open `http://localhost:5173`. Register a Landowner, a Village Officer, and
 a Registrar to exercise the full approval workflow; a Registrar can create
 land records, and the `/verify` and `/certificates` pages work independently
 of the approval flow for any authenticated role.
+
+## Running the tests
+
+```bash
+npm test                      # unit tests (node --test): canonicalization,
+                               # signature verify, certificate valid/expired/revoked
+npm run attack-sim            # attack simulation — requires the API running
+                               # separately first (npm run dev), and prints a
+                               # pass/fail table; exits non-zero if any attack
+                               # that should have been blocked instead succeeded
+```
+
+## Deploying
+
+This is a two-service deployment: the API (this repo's root, as a Docker
+container) and the frontend (`frontend/`, a static Vite build). They are
+deployed independently and talk to each other only over HTTPS via
+`FRONTEND_ORIGIN` / `VITE_API_URL`.
+
+### 1. Database — Neon
+
+Create a **new, separate Neon project/database for production** — do not
+point production at the same database used for local development. Copy its
+pooled connection string into `DATABASE_URL`.
+
+### 2. API — Render (Docker)
+
+1. Push this repo (with the root `Dockerfile`) to GitHub, then create a new
+   Render **Web Service** from it, environment "Docker".
+2. Set the environment variables below (Render's dashboard → Environment).
+   Mark `JWT_SECRET`, `ADMIN_PASSWORD`, and the two `CA_*_BASE64` vars as
+   **Secrets**, not plain env vars.
+3. First deploy only: run `npm run first-run` once against the production
+   environment (Render's "Shell" tab on the service, or a one-off Job) to
+   apply migrations, create/load the CA key pair, and create the first
+   ADMIN account. It's safe to run again on later deploys — every step is a
+   no-op if already done, **except** that if it had to *generate* a CA key
+   pair, it prints the `CA_PRIVATE_KEY_BASE64` / `CA_PUBLIC_KEY_BASE64`
+   values once; copy those into Render's env vars immediately; Render's
+   filesystem is ephemeral, so without this the CA key (and every
+   certificate ever issued) is lost on the next redeploy.
+4. Subsequent deploys: just redeploy the image. `node server.ts` (the
+   container's `CMD`) does not run migrations itself by design — rerun
+   `npm run first-run` (or at least `npx prisma migrate deploy`) after any
+   deploy that adds a new migration.
+
+| Variable | Notes |
+|---|---|
+| `DATABASE_URL` | Neon production connection string |
+| `JWT_SECRET` | long random string; **secret** |
+| `CA_PRIVATE_KEY_BASE64` / `CA_PUBLIC_KEY_BASE64` | from first `first-run`; **secrets** |
+| `TRUST_PROXY` | leave unset (defaults to `1` when `NODE_ENV=production`) |
+| `ENABLE_DEMO_TAMPER` | `false` — keep off outside grading/demo |
+| `RATE_LIMIT_LOGIN_MAX` / `RATE_LIMIT_LOGIN_WINDOW_MS` | defaults `10` / `900000` (15 min) |
+| `RATE_LIMIT_REGISTER_MAX` / `RATE_LIMIT_REGISTER_WINDOW_MS` | defaults `20` / `3600000` (1 hr) |
+| `PG_POOL_MAX` | default `10` |
+| `ADMIN_NAME` / `ADMIN_EMAIL` / `ADMIN_PASSWORD` | consumed once by `first-run`; `ADMIN_PASSWORD` **secret**, 10+ chars |
+| `FRONTEND_ORIGIN` | the deployed frontend's exact origin, e.g. `https://bhoomirakshak.vercel.app` |
+| `NODE_ENV` | `production` |
+| `PORT` | Render sets this itself — no action needed |
+
+See `.env.example` for the full list with descriptions.
+
+### 3. Frontend — Vercel
+
+1. Import `frontend/` as the project root in Vercel (Framework preset:
+   Vite).
+2. Set `VITE_API_URL` to the deployed API's URL plus `/api`, e.g.
+   `https://bhoomirakshak-api.onrender.com/api`.
+3. Deploy. Update the API's `FRONTEND_ORIGIN` to match the resulting
+   Vercel URL (CORS will reject requests from any other origin).
+
+### Known Limits (deployment-specific)
+
+- **No measured production throughput under real concurrent load.** What
+  *is* measured, against a remote Neon database from a local dev machine
+  (`scripts/test-audit-chain.ts`): a single audit-log write takes roughly
+  1.2–1.5s (dominated by Neon round-trip latency, not CPU), and 20
+  concurrent writes serialized through the audit chain's advisory lock take
+  roughly 20–25s total (i.e. they queue, by design — the chain cannot allow
+  two writes to compute the next hash concurrently). A full transaction
+  submit (signature verify + business write + audit entry, one Prisma
+  transaction) was observed at up to ~5.8s uncontended. These are useful as
+  a sanity floor, not a load-test result — a proper load test (e.g. k6 or
+  autocannon hitting a deployed instance) was out of scope for this pass.
+- **This is a prototype CA, not a legally recognized one.** Certificates
+  are self-issued by this application's own root key — there is no
+  real-world chain of trust, OCSP, or third-party attestation. It
+  demonstrates the mechanics of PKI-based trust (issuance, expiry,
+  revocation, signature verification), not a production CA.
+- See also the application-level Known Limits below (server-served JS,
+  no password recovery, etc.) — those apply in any environment, not just
+  this deployment.
 
 ## Known Limits
 
