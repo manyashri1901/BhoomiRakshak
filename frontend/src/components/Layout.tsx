@@ -11,10 +11,12 @@ import {
   Stamp,
   Home,
   ClipboardCheck,
+  X,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { roleHomePath, ROLE_LABELS } from "../lib/roleHome";
 import { Sidebar, type SidebarNavItem } from "./ui/Sidebar";
+import { ScrollProgressBar } from "./ui/ScrollProgressBar";
 import type { Role } from "../types";
 
 const ROLE_HOME_NAV: Record<Role, SidebarNavItem> = {
@@ -28,6 +30,19 @@ const COMMON_NAV: SidebarNavItem[] = [
   { to: "/land-records", label: "Registry", icon: Database },
   { to: "/certificates", label: "Certificates", icon: FileBadge2 },
   { to: "/verify", label: "Verify", icon: SearchCheck },
+];
+
+const PUBLIC_NAV = [
+  { to: "/", label: "Home", end: true },
+  { to: "/how-it-works", label: "How it works", end: false },
+  { to: "/verify", label: "Verify a record", end: false },
+];
+
+const PUBLIC_FOOTER_LINKS = [
+  { to: "/", label: "Home" },
+  { to: "/how-it-works", label: "How it works" },
+  { to: "/verify", label: "Verify" },
+  { to: "/login", label: "Login" },
 ];
 
 function Logo() {
@@ -53,6 +68,13 @@ function Logo() {
       />
     </svg>
   );
+}
+
+function navLinkClasses(isActive: boolean) {
+  return [
+    "text-sm font-medium transition-colors",
+    isActive ? "text-navy" : "text-slate-600 hover:text-slate-900",
+  ].join(" ");
 }
 
 function UserMenu() {
@@ -120,23 +142,120 @@ function UserMenu() {
   );
 }
 
+function PublicNav() {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const location = useLocation();
+
+  // Close the mobile menu on every navigation rather than leaving it open
+  // behind the new page.
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [location.pathname]);
+
+  return (
+    <>
+      <nav className="hidden items-center gap-6 md:flex">
+        {PUBLIC_NAV.map(({ to, label, end }) => (
+          <NavLink key={to} to={to} end={end} className={({ isActive }) => navLinkClasses(isActive)}>
+            {label}
+          </NavLink>
+        ))}
+      </nav>
+
+      <div className="ml-auto hidden items-center gap-3 md:flex">
+        <NavLink to="/login" className={({ isActive }) => navLinkClasses(isActive)}>
+          Login
+        </NavLink>
+        <Link
+          to="/register"
+          className="rounded-lg bg-navy px-3.5 py-1.5 text-sm font-medium text-white hover:bg-navy-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-navy"
+        >
+          Get started
+        </Link>
+      </div>
+
+      <button
+        type="button"
+        onClick={() => setMenuOpen((o) => !o)}
+        aria-label={menuOpen ? "Close menu" : "Open menu"}
+        aria-expanded={menuOpen}
+        className="ml-auto flex h-9 w-9 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-navy md:hidden"
+      >
+        {menuOpen ? <X className="h-5 w-5" aria-hidden="true" /> : <Menu className="h-5 w-5" aria-hidden="true" />}
+      </button>
+
+      {menuOpen && (
+        <div className="absolute inset-x-0 top-full z-20 border-b border-slate-200 bg-white px-4 py-3 shadow-md md:hidden">
+          <nav className="flex flex-col gap-1">
+            {PUBLIC_NAV.map(({ to, label, end }) => (
+              <NavLink
+                key={to}
+                to={to}
+                end={end}
+                className={({ isActive }) =>
+                  `rounded-lg px-3 py-2 text-sm font-medium ${isActive ? "bg-navy/5 text-navy" : "text-slate-700 hover:bg-slate-50"}`
+                }
+              >
+                {label}
+              </NavLink>
+            ))}
+            <div className="mt-2 flex flex-col gap-2 border-t border-slate-200 pt-3">
+              <NavLink to="/login" className="rounded-lg px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                Login
+              </NavLink>
+              <Link
+                to="/register"
+                className="rounded-lg bg-navy px-3 py-2 text-center text-sm font-medium text-white hover:bg-navy-hover"
+              >
+                Get started
+              </Link>
+            </div>
+          </nav>
+        </div>
+      )}
+    </>
+  );
+}
+
+function PublicFooter() {
+  return (
+    <footer className="border-t border-slate-200 bg-white py-8">
+      <div className="mx-auto flex max-w-300 flex-col items-center gap-3 px-4 text-center sm:px-6">
+        <div className="text-sm font-semibold text-slate-900">BhoomiRakshak</div>
+        <p className="max-w-md text-xs text-slate-500">
+          PKI-based secure land record and ownership management — every transaction signed,
+          every record independently verifiable.
+        </p>
+        <nav className="flex flex-wrap items-center justify-center gap-x-5 gap-y-1">
+          {PUBLIC_FOOTER_LINKS.map(({ to, label }) => (
+            <Link key={to} to={to} className="text-xs font-medium text-slate-600 hover:text-slate-900">
+              {label}
+            </Link>
+          ))}
+        </nav>
+        <p className="text-xs text-slate-400">Demo prototype</p>
+      </div>
+    </footer>
+  );
+}
+
 export function Layout() {
   const { user } = useAuth();
   const location = useLocation();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
-  // The hero page has its own Log In / Register CTAs as the single clear
-  // action — showing the same pair in the nav too just competes with them.
-  // Every other logged-out page (including /login and /register
-  // themselves) keeps the nav links unchanged.
-  const isHeroPage = location.pathname === "/";
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [location.pathname]);
 
   const sidebarItems: SidebarNavItem[] = user ? [ROLE_HOME_NAV[user.role], ...COMMON_NAV] : [];
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50">
+      <ScrollProgressBar />
+
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur supports-backdrop-filter:bg-white/80">
-        <div className="mx-auto flex max-w-300 items-center gap-4 px-4 py-3 sm:px-6">
+        <div className="relative mx-auto flex max-w-300 items-center gap-4 px-4 py-3 sm:px-6">
           {user && (
             <button
               type="button"
@@ -156,28 +275,13 @@ export function Layout() {
             BhoomiRakshak
           </Link>
 
-          <div className="ml-auto flex items-center gap-3">
-            {user ? (
+          {user ? (
+            <div className="ml-auto flex items-center gap-3">
               <UserMenu />
-            ) : (
-              !isHeroPage && (
-                <>
-                  <NavLink
-                    to="/login"
-                    className="text-sm font-medium text-slate-600 hover:text-slate-900"
-                  >
-                    Log in
-                  </NavLink>
-                  <Link
-                    to="/register"
-                    className="rounded-lg bg-navy px-3.5 py-1.5 text-sm font-medium text-white hover:bg-navy-hover"
-                  >
-                    Register
-                  </Link>
-                </>
-              )
-            )}
-          </div>
+            </div>
+          ) : (
+            <PublicNav />
+          )}
         </div>
       </header>
 
@@ -185,13 +289,19 @@ export function Layout() {
         {user && <Sidebar items={sidebarItems} mobileOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />}
 
         <main className="w-full min-w-0 flex-1 px-4 py-8 sm:px-6">
-          <Outlet />
+          <div key={location.pathname} className="animate-route-fade">
+            <Outlet />
+          </div>
         </main>
       </div>
 
-      <footer className="border-t border-slate-200 bg-white py-4 text-center text-xs text-slate-500">
-        BhoomiRakshak — PKI-based Secure Land Record &amp; Ownership Management System
-      </footer>
+      {user ? (
+        <footer className="border-t border-slate-200 bg-white py-4 text-center text-xs text-slate-500">
+          BhoomiRakshak — PKI-based Secure Land Record &amp; Ownership Management System
+        </footer>
+      ) : (
+        <PublicFooter />
+      )}
     </div>
   );
 }

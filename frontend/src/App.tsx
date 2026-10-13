@@ -5,6 +5,7 @@ import { RoleRoute } from "./components/RoleRoute";
 import { useAuth } from "./context/AuthContext";
 import { roleHomePath } from "./lib/roleHome";
 import { HomePage } from "./pages/HomePage";
+import { HowItWorksPage } from "./pages/HowItWorksPage";
 import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
 import { LandownerDashboard } from "./pages/LandownerDashboard";
@@ -61,6 +62,7 @@ export default function App() {
         </Route>
 
         <Route path="/" element={<RootRoute />} />
+        <Route path="/how-it-works" element={<HowItWorksPage />} />
         <Route path="*" element={<UnknownRouteRedirect />} />
       </Route>
     </Routes>

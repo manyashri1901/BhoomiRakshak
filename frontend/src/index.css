@@ -60,6 +60,29 @@ body {
   }
 }
 
+/* Simple fade on route change (components/Layout.tsx) — keyed by
+   pathname so each navigation retriggers it. Reduced-motion shows the new
+   page immediately, same as every other opt-in animation here. */
+@keyframes route-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-route-fade {
+  animation: route-fade 220ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-route-fade {
+    animation: none !important;
+    opacity: 1 !important;
+  }
+}
+
 /* Skeleton loading shimmer (components/ui/Skeleton.tsx). */
 @keyframes skeleton-pulse {
   0%,
