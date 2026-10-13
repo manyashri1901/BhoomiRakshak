@@ -15,6 +15,8 @@
 
 import "dotenv/config";
 import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import {
   generateKeyPair,
   exportPublicKeySpkiPem,
@@ -55,6 +57,45 @@ function assertSetupOk(res: { status: number; data: unknown }, label: string) {
   if (res.status !== 201) {
     throw new Error(`Setup step failed, aborting: ${label} — HTTP ${res.status}: ${JSON.stringify(res.data)}`);
   }
+}
+
+// Markdown table cells can't contain a literal "|" or a newline without
+// breaking the table — escape/flatten both rather than assume no attack's
+// expected/actual text ever contains one.
+function mdCell(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+}
+
+function truncate(value: string, maxLength: number): string {
+  return value.length > maxLength ? value.slice(0, maxLength - 1) + "…" : value;
+}
+
+// Writes the same results the console table already showed out to
+// docs/attack-results.md, so the attack table can be pasted into (or
+// linked from) the case-study report without re-running the script and
+// copying terminal output by hand. Pure reporting — no effect on any
+// attack's pass/fail logic above.
+function writeMarkdownReport(allResults: AttackResult[], blockedCount: number) {
+  const docsDir = path.join(process.cwd(), "docs");
+  fs.mkdirSync(docsDir, { recursive: true });
+
+  const lines: string[] = [];
+  lines.push("# Attack Simulation Results");
+  lines.push("");
+  lines.push(`Run: ${new Date().toISOString()}`);
+  lines.push("");
+  lines.push(`**${blockedCount} of ${allResults.length} attacks blocked**`);
+  lines.push("");
+  lines.push("| # | Attack | Expected defence | Actual response | Result |");
+  lines.push("|---|---|---|---|---|");
+  allResults.forEach((r, i) => {
+    lines.push(
+      `| ${i} | ${mdCell(r.attack)} | ${mdCell(r.expected)} | ${mdCell(truncate(r.actual, 80))} | ${r.pass ? "PASS (blocked)" : "FAIL (succeeded!)"} |`,
+    );
+  });
+  lines.push("");
+
+  fs.writeFileSync(path.join(docsDir, "attack-results.md"), lines.join("\n"), "utf8");
 }
 
 async function api(path: string, token: string | null, method = "GET", body?: unknown) {
@@ -532,6 +573,8 @@ async function main() {
 
   const blocked = results.filter((r) => r.pass).length;
   console.log(`\n${blocked} of ${results.length} attacks blocked`);
+
+  writeMarkdownReport(results, blocked);
 
   await prisma.$disconnect();
   if (blocked !== results.length) {
