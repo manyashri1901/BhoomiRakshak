@@ -15,7 +15,13 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { prisma } from "../lib/prisma.ts";
-import { generateUserKeyPair, issueCertificate, verifyCertificate, revokeCertificate } from "../lib/ca.ts";
+import {
+  generateUserKeyPair,
+  issueCertificate,
+  verifyCertificate,
+  revokeCertificate,
+  getSignedCRL,
+} from "../lib/ca.ts";
 import { canonicalStringify } from "../lib/canonicalize.ts";
 
 async function makeTestUser(label: string) {
@@ -90,4 +96,53 @@ test("verifyCertificate: invalid once past expiresAt, even with a genuine CA sig
   assert.equal(result.valid, false);
   assert.equal(result.details.expired, true);
   assert.equal(result.details.signatureValid, true); // genuinely signed — just expired, not forged
+});
+
+test("verifyCertificate: a tampered public key fails signature verification", async () => {
+  const user = await makeTestUser("Tampered");
+  const { publicKey } = generateUserKeyPair();
+  await prisma.user.update({ where: { id: user.id }, data: { publicKey } });
+  const certificate = await issueCertificate({ id: user.id, name: user.name, role: user.role, publicKey });
+
+  // An attacker with raw DB access swaps in a different (also genuinely
+  // generated) public key after the fact — the stored signature was
+  // computed over the ORIGINAL key, so it must no longer verify against
+  // this substituted one, even though the substituted key is itself a
+  // perfectly valid RSA key.
+  const { publicKey: substitutedKey } = generateUserKeyPair();
+  await prisma.certificate.update({ where: { id: certificate.id }, data: { publicKey: substitutedKey } });
+
+  const result = await verifyCertificate(certificate.id);
+  assert.equal(result.valid, false);
+  assert.equal(result.details.signatureValid, false);
+  assert.match(result.details.reason ?? "", /signature/i);
+});
+
+test("getSignedCRL: a revoked certificate's serial appears in revokedSerials, and the CRL's own signature verifies", async () => {
+  const user = await makeTestUser("CRL Listed");
+  const { publicKey } = generateUserKeyPair();
+  await prisma.user.update({ where: { id: user.id }, data: { publicKey } });
+  const certificate = await issueCertificate({ id: user.id, name: user.name, role: user.role, publicKey });
+
+  const beforeCrl = await getSignedCRL();
+  assert.ok(!beforeCrl.revokedSerials.includes(certificate.id));
+
+  await revokeCertificate({ certificateId: certificate.id, revokedByUserId: user.id, reason: "unit test CRL listing" });
+
+  const afterCrl = await getSignedCRL();
+  assert.ok(afterCrl.revokedSerials.includes(certificate.id));
+  assert.equal(afterCrl.type, "CRL");
+
+  // The CRL's own signature must verify against the CA's public key, over
+  // exactly the fields that were signed (including the domain-separation
+  // "type" tag) — the same shape the frontend's verify helper rebuilds.
+  const caPublicKey = fs.readFileSync(path.join(process.cwd(), "keys", "ca-public.pem"), "utf8");
+  const { signature, ...payload } = afterCrl;
+  const signatureValid = crypto.verify(
+    "RSA-SHA256",
+    Buffer.from(canonicalStringify(payload), "utf8"),
+    caPublicKey,
+    Buffer.from(signature, "base64"),
+  );
+  assert.equal(signatureValid, true);
 });

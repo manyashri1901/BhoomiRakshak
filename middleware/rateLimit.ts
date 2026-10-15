@@ -50,3 +50,21 @@ export const registerRateLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: "Too many registration attempts from this address. Please try again later." },
 });
+
+// Shared by every "directory-style" lookup endpoint — certificate lookup
+// by serial, certificate name search, and the general user search/picker
+// (/api/users) — all authenticated already, but each is still a
+// repeatable, scriptable way to enumerate identities one request at a
+// time, which login/register's own limiters above don't cover at all.
+// Keyed by IP + the logged-in user id (not IP alone) so one authenticated
+// account hammering this doesn't exhaust the budget for every other user
+// behind the same IP (an office NAT, etc.) — same reasoning as
+// loginRateLimiter's IP+email key.
+export const directoryLookupRateLimiter = rateLimit({
+  windowMs: envInt("RATE_LIMIT_DIRECTORY_WINDOW_MS", 60 * 1000),
+  limit: envInt("RATE_LIMIT_DIRECTORY_MAX", 30),
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${ipKeyGenerator(req.ip ?? "")}:${req.user?.userId ?? "anon"}`,
+  message: { error: "Too many lookup requests. Please slow down and try again shortly." },
+});

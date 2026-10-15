@@ -508,6 +508,104 @@ export async function revokeCertificate(
   };
 }
 
+// ---------------------------------------------------------------------------
+// 3c. CA PUBLIC IDENTITY + SIGNED CRL (client-side certificate verification)
+// ---------------------------------------------------------------------------
+//
+// The two functions below exist so the BROWSER can independently verify a
+// certificate's authenticity and revocation status itself — see
+// frontend/src/lib/certificateVerify.ts — rather than trusting a verdict
+// computed only by this server. getCAPublicCertificate() publishes what the
+// browser needs to bootstrap that trust (the CA's own public key); getSignedCRL()
+// publishes a CA-signed, freshness-bounded revocation list the browser can
+// check a certificate's serial against without a live per-certificate query.
+
+export interface CAPublicCertificate {
+  issuer: string;
+  publicKey: string;
+  // SHA-256 of the CA public key PEM — same convention as a certificate's
+  // own fingerprint. Displayed on the Certificate Lookup page so a user
+  // has *something* concrete to compare against an out-of-band published
+  // value, which is the actual trust-bootstrap mechanism in a real
+  // deployment (see the comment on the /ca route for why fetching it from
+  // this same server doesn't by itself establish trust).
+  fingerprint: string;
+}
+
+export function getCAPublicCertificate(): CAPublicCertificate {
+  const { publicKey } = ensureRootCA();
+  const fingerprint = crypto.createHash("sha256").update(publicKey, "utf8").digest("hex");
+  return { issuer: CA_ISSUER_NAME, publicKey, fingerprint };
+}
+
+// The CRL is only ever valid for this long after it's issued — the
+// browser's own verify helper treats a CRL older than this as untrustworthy
+// (reported under its "CRL freshness" check) regardless of whether its
+// signature still verifies, since a stale-but-genuinely-signed CRL could be
+// replayed to hide a revocation that happened after it was issued.
+const CRL_VALIDITY_MS = 60 * 60 * 1000; // 1 hour
+
+export interface SignedCRL {
+  type: "CRL";
+  issuer: string;
+  thisUpdate: string;
+  nextUpdate: string;
+  revokedSerials: string[];
+  signature: string;
+}
+
+interface CRLPayload {
+  type: "CRL";
+  issuer: string;
+  thisUpdate: string;
+  nextUpdate: string;
+  revokedSerials: string[];
+}
+
+/**
+ * A CA-signed, freshness-bounded Certificate Revocation List — distinct
+ * from getCRL() below (which returns the same revoked set as a plain,
+ * unsigned list for the Admin UI's CRL table and is left untouched).
+ *
+ * Domain separation: this payload carries an explicit `type: "CRL"` field
+ * precisely so a CRL signature can never be confused with a certificate
+ * signature. Certificates (buildCertificatePayload, above) do NOT get an
+ * equivalent tag — adding one would change the exact bytes
+ * verifyCertificate() reconstructs and checks the stored signature
+ * against, which would invalidate every certificate already issued before
+ * this change (their signature was computed over the untagged shape and
+ * can never be made to match a differently-shaped rebuild). In practice
+ * this is not a live confusion risk even without the tag: a certificate
+ * payload's key set ({subject,name,role,publicKey,issuer,issuedAt,
+ * expiresAt}) and this CRL payload's key set ({type,issuer,thisUpdate,
+ * nextUpdate,revokedSerials}) are completely disjoint, so
+ * canonicalStringify() can never produce identical bytes for one as for
+ * the other regardless of field values — the `type` tag here is
+ * defense-in-depth for this payload and any future one, not a fix for an
+ * exploitable gap in the certificate payload today.
+ */
+export function getSignedCRL(): Promise<SignedCRL> {
+  return getCRL().then((revoked) => {
+    const { privateKey } = ensureRootCA();
+    const thisUpdate = new Date();
+    const nextUpdate = new Date(thisUpdate.getTime() + CRL_VALIDITY_MS);
+
+    const payload: CRLPayload = {
+      type: "CRL",
+      issuer: CA_ISSUER_NAME,
+      thisUpdate: thisUpdate.toISOString(),
+      nextUpdate: nextUpdate.toISOString(),
+      revokedSerials: revoked.map((r) => r.certificateId),
+    };
+    const canonicalPayload = canonicalStringify(payload);
+    const signature = crypto
+      .sign("RSA-SHA256", Buffer.from(canonicalPayload, "utf8"), privateKey)
+      .toString("base64");
+
+    return { ...payload, signature };
+  });
+}
+
 /**
  * The Certificate Revocation List: every certificate the CA has revoked,
  * most recent first. Any stakeholder can fetch this to check a signer's

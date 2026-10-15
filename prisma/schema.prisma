@@ -78,6 +78,11 @@ model User {
   auditLogs           AuditLog[]
   signingNonces       SigningNonce[]
 
+  // Backs the certificate name-search endpoint (routes/certificates.ts),
+  // which queries with `startsWith` specifically so this index can serve
+  // it — a plain btree index doesn't accelerate a `contains` (substring)
+  // scan, only a prefix one.
+  @@index([name])
   @@map("users")
 }
 
