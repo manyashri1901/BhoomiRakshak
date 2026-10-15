@@ -74,7 +74,13 @@ export function UserPicker({ role, placeholder, selected, onSelect }: UserPicker
       </div>
       {open && (
         <div className="absolute z-10 mt-1 max-h-48 w-full overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-md">
-          {results.length === 0 && <div className="px-3 py-2 text-sm text-slate-500">No matches.</div>}
+          {results.length === 0 && (
+            <div className="px-3 py-2 text-sm text-slate-500">
+              {/* The server returns [] for any query under 3 characters —
+                  an anti-enumeration bound, not a real "no results" case. */}
+              {query.trim().length < 3 ? "Type at least 3 characters to search." : "No matches."}
+            </div>
+          )}
           {results.map((u) => (
             <button
               key={u.id}

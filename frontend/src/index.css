@@ -11,9 +11,22 @@
      here. Only navy and teal need a token, since components should never
      hard-code their hex values. */
   --color-navy: #0f2a4a;
-  --color-navy-hover: #0b2038; /* navy darkened ~15% toward black */
-  --color-teal: #0d9488;
-  --color-teal-hover: #0b7e73; /* teal darkened ~12% toward black */
+  --color-navy-hover: #173b63;
+  --color-teal: #0f766e;
+  --color-teal-hover: #0b5f59;
+
+  /* Status colors for the two "Honest by design" / record-panel status
+     uses on the home page — new, purely additive tokens (nothing else in
+     the app references these names yet, so this has no effect on any
+     other page, unlike overriding Tailwind's own green/amber/red scale
+     would). Precise values from the reference design, close to but not
+     identical to Tailwind's own green-700/amber-700/red-700. */
+  --color-success: #147a48;
+  --color-success-bg: #eaf7f0;
+  --color-warning: #9a5d08;
+  --color-warning-bg: #fff7e6;
+  --color-danger: #b42318;
+  --color-danger-bg: #fff0ef;
 
   --font-sans: "InterVariable", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;

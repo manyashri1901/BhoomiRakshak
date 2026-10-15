@@ -43,8 +43,10 @@ export default function App() {
         <Route element={<ProtectedRoute />}>
           <Route path="/land-records" element={<LandRecordsRegistry />} />
           <Route path="/land-records/:id" element={<LandRecordDetail />} />
+          {/* No :userId/:serial param — CertificateLookup is now a single,
+              state-driven page (serial input + optional name search),
+              not a per-identifier route. */}
           <Route path="/certificates" element={<CertificateLookup />} />
-          <Route path="/certificates/:userId" element={<CertificateLookup />} />
           <Route path="/verify" element={<VerifyPage />} />
 
           <Route element={<RoleRoute allowed={["LANDOWNER"]} />}>
