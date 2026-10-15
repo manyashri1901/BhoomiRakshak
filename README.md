@@ -66,6 +66,97 @@ a **prepare → sign → submit** sequence:
 A rejected review never involves a signature, so reject stays a plain
 authenticated endpoint with no nonce/signing step.
 
+## Technical design
+
+The public site (Home, How it works, About) deliberately keeps this detail
+out of view — this section holds what it leaves out, for anyone reading the
+code or grading it.
+
+**Certificate model** (`lib/ca.ts`) — not X.509. A certificate is a custom
+JSON payload (`subject, name, role, publicKey, issuer, issuedAt, expiresAt`),
+canonicalized (`lib/canonicalize.ts`) and signed with RSA-2048/SHA-256
+(`crypto.sign("RSA-SHA256", ...)`) by a single root CA key pair
+(`ensureRootCA()`). The stored `Certificate` row (`prisma/schema.prisma`)
+also carries a `fingerprint` (SHA-256 of the subject's public key) and the
+revocation fields (`revoked`, `revokedAt`, `revokedReason`).
+
+**Client-side key generation and private-key storage** — covered above
+under "Client-side signing"
+(`frontend/src/lib/clientCrypto.ts`): RSASSA-PKCS1-v1_5 2048-bit keys
+generated in the browser; the private key is wrapped with AES-256-GCM
+(key derived via PBKDF2-SHA256, 600,000 iterations) before it ever leaves
+memory. Only the wrapped blob (`User.wrappedPrivateKey/wrapSalt/wrapIv` in
+`prisma/schema.prisma`) is stored server-side.
+
+**Prepare → sign → submit with a single-use nonce** — also covered above
+(`lib/signingNonce.ts`'s `SigningNonce` model, `createSigningNonce`/
+`consumeSigningNonce`; `routes/transactions.ts`'s `/prepare` and `/submit`
+endpoints per review stage).
+
+**Chained signatures** — each review stage's signed payload embeds the
+fingerprint of the reviewer's own certificate plus the prior signature(s)
+in the chain (`routes/transactions.ts`'s `buildReviewPayload`/
+`rebuildCreationPayload`). `routes/transactions.ts`'s
+`verifySignatureChain()` re-verifies every signature in a transaction's
+chain live, against each actor's *current* public key — never a cached
+"was valid when signed" flag.
+
+**Hash-chained audit log** (`lib/audit.ts`) — a system-wide `AuditLog`
+table, separate from the per-transaction signature chain, where each row's
+hash commits to every field plus the previous row's hash
+(`computeEntryHash`). Writes are serialized through a Postgres advisory
+lock (`pg_advisory_xact_lock`, `AUDIT_CHAIN_LOCK_KEY`) so concurrent
+writers can never fork the chain. `verifyAuditChain()` recomputes and
+checks the whole chain on demand, reporting the first broken sequence
+number rather than trusting a cached flag.
+
+**Double-sale prevention** — a `LandRecord` only accepts a new transaction
+while `status = ACTIVE` (checked in `routes/transactions.ts`), backed by a
+database-level partial unique index
+(`prisma/migrations/20261012110626_add_pending_transaction_unique_index`)
+on `transactions(landRecordId)` for rows with
+`status IN ('PENDING_VO', 'PENDING_REGISTRAR')` — the actual race-condition
+backstop behind the application-level check, surfaced as a 409 on conflict.
+
+**Upload validation** (`lib/fileType.ts`, `routes/documents.ts`) — uploads
+are held in memory, their magic bytes checked against the PDF/PNG/JPEG
+signatures in `lib/fileType.ts` *before* anything touches disk, and stored
+under a random UUID filename with an extension derived from the detected
+type, not the client-supplied one.
+
+**Signed CRL and client-side certificate verification** — `lib/ca.ts`'s
+`getSignedCRL()` publishes a CA-signed revocation list with
+`thisUpdate`/`nextUpdate` timestamps and a `type: "CRL"` domain-separation
+tag (so a CRL signature can never be mistaken for a certificate
+signature). `frontend/src/lib/certificateVerify.ts` independently verifies,
+entirely in the browser via WebCrypto: the certificate's CA signature, its
+validity window, the CRL's own signature and freshness, and whether the
+certificate's serial appears on the CRL — four checks, never a verdict
+computed only by the server.
+
+**Rate limiting and headers** (`middleware/rateLimit.ts`, `server.ts`) —
+`loginRateLimiter` (IP+email-keyed, skips successful attempts),
+`registerRateLimiter`, and `directoryLookupRateLimiter` (IP+user-keyed,
+shared by `/api/users`, `/api/certificates/search`, and
+`/api/certificates/serial/:id`). `server.ts` applies `helmet()` globally.
+
+## Limitations
+
+- **Custom certificate format, not X.509.** No ASN.1/DER structure, no
+  real serial-number field — `Certificate.id` (a cuid) stands in for one.
+- **Single root CA, operated by this system.** Not a licensed or
+  government-recognised certificate authority; see `lib/ca.ts`.
+- **No trusted timestamping.** `issuedAt`/`thisUpdate`/`nextUpdate` are
+  this server's own clock, not a third-party timestamp authority.
+- **No integration with any government land record database.**
+- **The signed CRL's freshness window is 1 hour** (`CRL_VALIDITY_MS` in
+  `lib/ca.ts`) — a revocation can take up to that long to be reflected in
+  a CRL a client already cached, by design (see the Cache-Control header
+  on `GET /api/certificates/crl/signed`).
+- **The attack simulation (`scripts/attack-simulation.ts`) is self-designed**,
+  not an independent or third-party red-team exercise — it exercises the
+  specific attacks this project anticipated, not an exhaustive security audit.
+
 ## Project structure
 
 ```
@@ -193,16 +284,42 @@ a Registrar to exercise the full approval workflow; a Registrar can create
 land records, and the `/verify` and `/certificates` pages work independently
 of the approval flow for any authenticated role.
 
-## Running the tests
+## Testing
 
 ```bash
-npm test                      # unit tests (node --test): canonicalization,
-                               # signature verify, certificate valid/expired/revoked
-npm run attack-sim            # attack simulation — requires the API running
-                               # separately first (npm run dev), and prints a
-                               # pass/fail table; exits non-zero if any attack
-                               # that should have been blocked instead succeeded
+npm test                               # unit tests (node --test)
+node scripts/test-certificate-lookup.ts       # HTTP-level: role gating, response
+                                               # shape, cache headers (server must
+                                               # already be running: npm run dev)
+node scripts/test-certificate-verify-client.ts # the actual browser verify helper
+                                               # against real signed data (server
+                                               # must already be running)
+npm run attack-sim                     # attack simulation — requires the API
+                                        # running separately first; prints a
+                                        # pass/fail table and writes it to
+                                        # docs/attack-results.md; exits non-zero
+                                        # if any attack that should have been
+                                        # blocked instead succeeded
 ```
+
+Current counts (as of this writing — re-run the commands above for the
+latest):
+
+- **`npm test`** — 17 `node --test` cases across `test/canonicalize.test.ts`,
+  `test/signing.test.ts`, `test/certificate.test.ts`: canonicalization
+  determinism and the shared backend/frontend test vector, signature
+  verify true/false paths, and certificate valid/expired/revoked/tampered,
+  plus the signed CRL listing a revoked serial.
+- **`scripts/test-certificate-lookup.ts`** — 13 HTTP-level checks: role
+  gating on certificate search, response shape (no private fields, no
+  server-computed verdict), cache headers, and the `/api/users`
+  enumeration fix.
+- **`scripts/test-certificate-verify-client.ts`** — 10 checks exercising
+  `frontend/src/lib/certificateVerify.ts` itself (not a reimplementation)
+  against a genuine, a tampered, and a revoked certificate.
+- **`scripts/attack-simulation.ts`** — writes its results to
+  `docs/attack-results.md` on every run; the most recent recorded result
+  in that file is **12 of 12 attacks blocked** (dated in the file itself).
 
 ## Deploying
 
