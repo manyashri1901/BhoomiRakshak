@@ -157,3 +157,5 @@ build/
 *.key
 /keys
 /generated/prisma
+
+design/

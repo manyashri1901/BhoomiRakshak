@@ -89,6 +89,50 @@ Dockerfile           Multi-stage build for the API (see "Deploying" below)
 .env.example         Full list of environment variables with descriptions
 ```
 
+## UI design
+
+The frontend is a minimalist flat design, trust-first (government/fintech
+feel) rather than decorative — no glassmorphism, neumorphism, or gradients
+on data. Light `backdrop-blur` is used only on the sticky navbar and modal
+overlays.
+
+**Principles**: large clear hierarchy (one type scale, Inter), generous
+white space, few colors, consistent 8px spacing, solid white cards with a
+thin `slate-200` border and a subtle shadow instead of heavier elevation
+effects. Interactive elements always show a visible focus ring. Animation
+is subtle and one-shot (sections fade/slide up once on entering the
+viewport, a thin scroll-progress bar, a brief fade on route change) and
+is skipped entirely under `prefers-reduced-motion`.
+
+**Color tokens** (`frontend/src/index.css`, defined once as Tailwind
+`@theme` variables so no component hard-codes a hex value):
+
+| Token | Value | Use |
+|---|---|---|
+| `--color-navy` | `#0F2A4A` | Primary — headings, primary buttons, active nav state |
+| `--color-teal` | `#0D9488` | Accent, used sparingly — links in illustrative/technical spots, scroll-progress bar |
+
+Everything else (neutrals, status colors, white surfaces) uses Tailwind's
+built-in `slate`/`green`/`amber`/`red`/`white` palette directly, since
+that palette is itself already a defined token set rather than ad hoc hex
+values.
+
+**Routes**:
+
+| Path | Page | Auth |
+|---|---|---|
+| `/` | Home (hero, features, CTA band) | Public |
+| `/how-it-works` | Interactive stepper, tamper-detection demo, PKI strip | Public |
+| `/login`, `/register` | Auth | Public |
+| `/verify` | Independent transaction verification | Logged in (unchanged) |
+| `/landowner`, `/village-officer`, `/registrar`, `/admin` | Role dashboards | Logged in, role-gated (unchanged) |
+| `/land-records`, `/land-records/:id`, `/certificates`, `/certificates/:userId` | Registry & certificate lookup | Logged in (unchanged) |
+
+Logged-in users keep the existing role sidebar + simple footer; the richer
+public navbar (Home / How it works / Verify a record / Login / Get
+started) and footer (links + "Demo prototype" note) only render when
+signed out.
+
 ## Setup
 
 ### Prerequisites
