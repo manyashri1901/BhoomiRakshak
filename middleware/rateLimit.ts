@@ -68,3 +68,18 @@ export const directoryLookupRateLimiter = rateLimit({
   keyGenerator: (req) => `${ipKeyGenerator(req.ip ?? "")}:${req.user?.userId ?? "anon"}`,
   message: { error: "Too many lookup requests. Please slow down and try again shortly." },
 });
+
+// POST /api/audit/anchor is already throttled in substance by
+// TSA_MIN_INTERVAL_SECONDS (lib/timestamp.ts refuses to contact the TSA
+// again before that interval elapses, for ANY caller) — this limiter is a
+// second, independent cap on request volume itself (ADMIN-only already,
+// but still worth bounding how often even a legitimate admin can trigger a
+// TSA round trip from one account).
+export const anchorRateLimiter = rateLimit({
+  windowMs: envInt("RATE_LIMIT_ANCHOR_WINDOW_MS", 60 * 1000),
+  limit: envInt("RATE_LIMIT_ANCHOR_MAX", 5),
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${ipKeyGenerator(req.ip ?? "")}:${req.user?.userId ?? "anon"}`,
+  message: { error: "Too many anchor requests. Please slow down and try again shortly." },
+});

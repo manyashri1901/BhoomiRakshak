@@ -29,6 +29,7 @@ import { verifyCertificate, verifyCertificateForUser, publicKeyPemFromCertificat
 import { createSigningNonce, consumeSigningNonce, SigningNonceError } from "../lib/signingNonce.ts";
 import { canonicalStringify } from "../lib/canonicalize.ts";
 import { appendAuditEntryTx } from "../lib/audit.ts";
+import { anchorAuditChainBestEffort } from "../lib/timestamp.ts";
 import type { TransactionType } from "../generated/prisma/enums.ts";
 import type { TransactionModel, LandRecordModel, SignatureModel } from "../generated/prisma/models.ts";
 
@@ -1016,6 +1017,12 @@ router.post("/:id/registrar-review/reject", requireAuth, requireRole("REGISTRAR"
     return txn;
   }, TRANSACTION_OPTIONS);
   res.json(updated);
+  // Fire-and-forget, after the response is already sent: a transaction
+  // reaching its final Registrar decision (reject, here) is a natural
+  // anchor point, but the TSA round trip must never add latency to this
+  // request or fail it — anchorAuditChainBestEffort() never throws and
+  // only ever logs a short warning on failure.
+  anchorAuditChainBestEffort();
 });
 
 // POST /api/transactions/:id/registrar-review/prepare
@@ -1198,6 +1205,9 @@ router.post("/:id/registrar-review/submit", requireAuth, requireRole("REGISTRAR"
     }, TRANSACTION_OPTIONS);
 
     res.json({ ...result.txn, signature: result.signature, landRecord: result.landRecord });
+    // Same reasoning as the reject route above: fire-and-forget, after the
+    // response, never allowed to add latency or fail this request.
+    anchorAuditChainBestEffort();
   } catch (err: unknown) {
     if (handleSigningNonceError(err, res)) return;
     throw err;

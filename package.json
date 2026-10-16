@@ -20,6 +20,7 @@
     "@peculiar/x509": "^2.1.0",
     "@prisma/adapter-pg": "^7.9.1",
     "@prisma/client": "^7.9.1",
+    "asn1js": "^3.0.10",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
@@ -29,6 +30,8 @@
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.2.0",
     "pg": "^8.23.0",
+    "pkijs": "^3.4.1",
+    "pvtsutils": "^1.3.6",
     "reflect-metadata": "^0.2.2"
   }
 }
