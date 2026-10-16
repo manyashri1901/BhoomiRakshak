@@ -1,6 +1,6 @@
 # Testing
 
-`scripts/test-client-signing-e2e.ts` and `scripts/attack-simulation.ts` both require `ADMIN_EMAIL` and `ADMIN_PASSWORD` set in the environment, matching a real ADMIN account — neither has a built-in fallback, and each exits with a clear error if either is missing.
+`scripts/test-client-signing-e2e.ts`, `scripts/attack-simulation.ts`, and `scripts/test-access-control.ts` all require `ADMIN_EMAIL` and `ADMIN_PASSWORD` set in the environment, matching a real ADMIN account — none has a built-in fallback, and each exits with a clear error if either is missing.
 
 ## Commands
 
@@ -35,6 +35,16 @@ node scripts/test-audit-anchor-tamper.ts # anchors, then tampers an anchored
                                         # to DATABASE_URL, same confirmation as
                                         # attack-sim below (it permanently
                                         # rewrites real AuditLog rows)
+node scripts/test-access-control.ts    # HTTP-level role x endpoint matrix:
+                                        # requireCertifiedRole() denials
+                                        # (CERT_MISSING/REVOKED/EXPIRED/
+                                        # ROLE_MISMATCH), object-level 404s
+                                        # (another owner's land record),
+                                        # and admin/role boundaries — requires
+                                        # TEST_DATABASE_URL set equal to
+                                        # DATABASE_URL (it revokes a real
+                                        # certificate) and ADMIN_EMAIL/
+                                        # ADMIN_PASSWORD
 npm run attack-sim                     # attack simulation — requires the API
                                         # running separately first, and
                                         # TEST_DATABASE_URL set equal to
@@ -50,17 +60,20 @@ npm run attack-sim                     # attack simulation — requires the API
 
 Counts (re-run the commands above to reproduce):
 
-- **`npm test`** — 35 `node --test` cases across `test/canonicalize.test.ts`
+- **`npm test`** — 41 `node --test` cases across `test/canonicalize.test.ts`
   (7), `test/signing.test.ts` (5), `test/certificate.test.ts` (8),
-  `test/x509Keys.test.ts` (8), `test/timestamp.test.ts` (7): canonicalization
+  `test/x509Keys.test.ts` (8), `test/timestamp.test.ts` (7),
+  `test/accessControl.test.ts` (6): canonicalization
   determinism and the shared backend/frontend test vector, signature
   verify true/false paths, certificate
   valid/expired/revoked/tampered/issued-by-an-unknown-CA, the real signed
   X.509 CRL, RSA key PEM round trips (file path, `*_BASE64` env path, CRLF,
-  no trailing newline), and RFC 3161 anchor verification (genuine token,
+  no trailing newline), RFC 3161 anchor verification (genuine token,
   wrong messageImprint, tampered CMS signature, wrong nonce, a certificate
   missing the `timeStamping` EKU, and an untrusted root — each checked
-  against the specific one of `verifyAnchor()`'s steps it's expected to fail).
+  against the specific one of `verifyAnchor()`'s steps it's expected to fail),
+  and `requireCertifiedRole()` (valid, revoked, expired, role-mismatched,
+  and missing certificates) plus `reviewerIsPriorSigner()` directly.
 - **`scripts/test-certificate-lookup.ts`** — 13 HTTP-level checks: role
   gating on certificate search, response shape (no private fields, no
   server-computed verdict), cache headers, and the `/api/users`
@@ -80,3 +93,9 @@ Counts (re-run the commands above to reproduce):
 - **`scripts/attack-simulation.ts`** — writes its results to
   `docs/attack-results.md` on every run; the result recorded there is
   **12 of 12 attacks blocked**.
+- **`scripts/test-access-control.ts`** — 19 HTTP-level checks: role x
+  endpoint denials with their `reason` code, object-level 404s for
+  another owner's land record (vs. a genuinely nonexistent one, which is
+  also 404 — indistinguishable, by design), Admin's audit/anchor access
+  without land-transaction signing, and a revoked identity rejected with
+  `reason: "CERT_REVOKED"`.

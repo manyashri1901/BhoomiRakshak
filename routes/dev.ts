@@ -17,7 +17,7 @@
 import express from "express";
 import * as crypto from "node:crypto";
 import { prisma } from "../lib/prisma.ts";
-import { requireAuth, requireRole } from "../middleware/auth.ts";
+import { requireAuth, requireCertifiedRole } from "../middleware/auth.ts";
 import { appendAuditEntry } from "../lib/audit.ts";
 
 const router = express.Router();
@@ -27,7 +27,7 @@ const router = express.Router();
 // exactly the kind of change a real attacker would make to redirect a
 // transaction to a different document without anyone noticing, if the
 // system only trusted what was in the database.
-router.post("/tamper/:transactionId", requireAuth, requireRole("REGISTRAR"), async (req, res) => {
+router.post("/tamper/:transactionId", requireAuth, requireCertifiedRole("REGISTRAR"), async (req, res) => {
   const transaction = await prisma.transaction.findUnique({
     where: { id: req.params.transactionId },
   });

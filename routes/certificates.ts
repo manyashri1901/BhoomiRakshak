@@ -28,7 +28,7 @@
 
 import express from "express";
 import { prisma } from "../lib/prisma.ts";
-import { requireAuth, requireRole } from "../middleware/auth.ts";
+import { requireAuth, requireRole, requireCertifiedRole } from "../middleware/auth.ts";
 import { directoryLookupRateLimiter } from "../middleware/rateLimit.ts";
 import { appendAuditEntry } from "../lib/audit.ts";
 import {
@@ -195,7 +195,7 @@ router.get("/serial/:serial", requireAuth, directoryLookupRateLimiter, async (re
   });
 });
 
-router.post("/:id/revoke", requireAuth, requireRole("ADMIN"), async (req, res) => {
+router.post("/:id/revoke", requireAuth, requireCertifiedRole("ADMIN"), async (req, res) => {
   const { reason } = req.body ?? {};
   if (typeof reason !== "string" || !reason.trim()) {
     res.status(400).json({ error: "reason is required to revoke a certificate" });

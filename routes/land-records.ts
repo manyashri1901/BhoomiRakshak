@@ -6,7 +6,7 @@
 
 import express from "express";
 import { prisma } from "../lib/prisma.ts";
-import { requireAuth, requireRole } from "../middleware/auth.ts";
+import { requireAuth, requireCertifiedRole } from "../middleware/auth.ts";
 import { verifySignatureChain, checkDocumentIntegrity } from "./transactions.ts";
 import { verifyCertificateForUser } from "../lib/ca.ts";
 import type { AreaUnit } from "../generated/prisma/enums.ts";
@@ -42,7 +42,7 @@ router.get("/", requireAuth, async (req, res) => {
   );
 });
 
-router.post("/", requireAuth, requireRole("REGISTRAR"), async (req, res) => {
+router.post("/", requireAuth, requireCertifiedRole("REGISTRAR"), async (req, res) => {
   const { surveyNumber, location, area, areaUnit, currentOwnerId } = req.body ?? {};
 
   if (typeof surveyNumber !== "string" || !surveyNumber.trim()) {
@@ -106,7 +106,13 @@ router.post("/", requireAuth, requireRole("REGISTRAR"), async (req, res) => {
 // the stored documentHash or a signature is visible here immediately.
 router.get("/:id/history", requireAuth, async (req, res) => {
   const landRecord = await prisma.landRecord.findUnique({ where: { id: req.params.id } });
-  if (!landRecord) {
+  // A Landowner who isn't the current owner gets exactly the same 404 as a
+  // land record that doesn't exist at all — a 403 here would confirm the
+  // ID is real, which is itself information this endpoint shouldn't leak.
+  // Village Officers and Registrars are unrestricted (same as GET / above):
+  // they need visibility across every record to review transactions
+  // against any of them.
+  if (!landRecord || (req.user!.role === "LANDOWNER" && landRecord.currentOwnerId !== req.user!.userId)) {
     res.status(404).json({ error: "landRecord not found" });
     return;
   }

@@ -23,7 +23,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { prisma } from "../lib/prisma.ts";
-import { requireAuth, requireRole } from "../middleware/auth.ts";
+import { requireAuth, requireRole, requireCertifiedRole } from "../middleware/auth.ts";
 import { verifySignature, verifySignatureOverCanonicalString } from "../lib/signing.ts";
 import { verifyCertificate, verifyCertificateForUser, publicKeyPemFromCertificatePem } from "../lib/ca.ts";
 import { createSigningNonce, consumeSigningNonce, SigningNonceError } from "../lib/signingNonce.ts";
@@ -458,7 +458,7 @@ async function validateAndBuildCreatePayload(
 }
 
 // POST /api/transactions/prepare
-router.post("/prepare", requireAuth, requireRole("LANDOWNER"), async (req, res) => {
+router.post("/prepare", requireAuth, requireCertifiedRole("LANDOWNER"), async (req, res) => {
   const prepared = await validateAndBuildCreatePayload(req, res);
   if (!prepared) return; // response already sent
 
@@ -481,7 +481,7 @@ router.post("/prepare", requireAuth, requireRole("LANDOWNER"), async (req, res) 
 // preconditions (certificate validity, land record status) are re-checked
 // here against that frozen payload's fields, because time has passed since
 // prepare and either could have changed.
-router.post("/submit", requireAuth, requireRole("LANDOWNER"), async (req, res) => {
+router.post("/submit", requireAuth, requireCertifiedRole("LANDOWNER"), async (req, res) => {
   const { nonce, signatureValue } = req.body ?? {};
   if (typeof nonce !== "string" || !nonce.trim()) {
     res.status(400).json({ error: "nonce is required" });
@@ -615,6 +615,17 @@ interface PriorCheckResult {
   failureReason: string | null;
 }
 
+// Separation of duties: the SAME account (not just the same role — roles
+// are one-per-account, so this only ever matters when one real person
+// registers more than one account) may never sign a transaction at more
+// than one stage. This single check covers both halves of that rule at
+// once — "nobody reviews a transaction they created" is just the case
+// where the prior stage being checked against is the LANDOWNER's own
+// creation signature.
+export function reviewerIsPriorSigner(reviewerId: string, transaction: TransactionWithChain): boolean {
+  return transaction.signatures.some((s) => s.actorId === reviewerId);
+}
+
 async function checkLandownerSignatureValid(
   transaction: TransactionWithChain,
   landownerSignature: TransactionWithChain["signatures"][number],
@@ -665,7 +676,7 @@ async function autoRejectTransaction(
 }
 
 // POST /api/transactions/:id/vo-review/reject
-router.post("/:id/vo-review/reject", requireAuth, requireRole("VILLAGE_OFFICER"), async (req, res) => {
+router.post("/:id/vo-review/reject", requireAuth, requireCertifiedRole("VILLAGE_OFFICER"), async (req, res) => {
   const { reason } = req.body ?? {};
   const transaction = await prisma.transaction.findUnique({
     where: { id: req.params.id },
@@ -682,6 +693,10 @@ router.post("/:id/vo-review/reject", requireAuth, requireRole("VILLAGE_OFFICER")
   const landownerSignature = transaction.signatures.find((s) => s.role === "LANDOWNER");
   if (!landownerSignature) {
     res.status(500).json({ error: "Landowner signature missing on this transaction" });
+    return;
+  }
+  if (reviewerIsPriorSigner(req.user!.userId, transaction)) {
+    res.status(403).json({ error: "You cannot review a transaction you created." });
     return;
   }
 
@@ -721,7 +736,7 @@ router.post("/:id/vo-review/reject", requireAuth, requireRole("VILLAGE_OFFICER")
 });
 
 // POST /api/transactions/:id/vo-review/prepare
-router.post("/:id/vo-review/prepare", requireAuth, requireRole("VILLAGE_OFFICER"), async (req, res) => {
+router.post("/:id/vo-review/prepare", requireAuth, requireCertifiedRole("VILLAGE_OFFICER"), async (req, res) => {
   const transaction = await prisma.transaction.findUnique({
     where: { id: req.params.id },
     include: transactionWithChain,
@@ -737,6 +752,10 @@ router.post("/:id/vo-review/prepare", requireAuth, requireRole("VILLAGE_OFFICER"
   const landownerSignature = transaction.signatures.find((s) => s.role === "LANDOWNER");
   if (!landownerSignature) {
     res.status(500).json({ error: "Landowner signature missing on this transaction" });
+    return;
+  }
+  if (reviewerIsPriorSigner(req.user!.userId, transaction)) {
+    res.status(403).json({ error: "You cannot review a transaction you created." });
     return;
   }
 
@@ -787,7 +806,7 @@ router.post("/:id/vo-review/prepare", requireAuth, requireRole("VILLAGE_OFFICER"
 });
 
 // POST /api/transactions/:id/vo-review/submit
-router.post("/:id/vo-review/submit", requireAuth, requireRole("VILLAGE_OFFICER"), async (req, res) => {
+router.post("/:id/vo-review/submit", requireAuth, requireCertifiedRole("VILLAGE_OFFICER"), async (req, res) => {
   const { nonce, signatureValue } = req.body ?? {};
   if (typeof nonce !== "string" || !nonce.trim() || typeof signatureValue !== "string" || !signatureValue.trim()) {
     res.status(400).json({ error: "nonce and signatureValue are required" });
@@ -809,6 +828,10 @@ router.post("/:id/vo-review/submit", requireAuth, requireRole("VILLAGE_OFFICER")
   const landownerSignature = transaction.signatures.find((s) => s.role === "LANDOWNER");
   if (!landownerSignature) {
     res.status(500).json({ error: "Landowner signature missing on this transaction" });
+    return;
+  }
+  if (reviewerIsPriorSigner(req.user!.userId, transaction)) {
+    res.status(403).json({ error: "You cannot review a transaction you created." });
     return;
   }
 
@@ -963,7 +986,7 @@ async function checkPriorSignaturesValidForRegistrar(
 }
 
 // POST /api/transactions/:id/registrar-review/reject
-router.post("/:id/registrar-review/reject", requireAuth, requireRole("REGISTRAR"), async (req, res) => {
+router.post("/:id/registrar-review/reject", requireAuth, requireCertifiedRole("REGISTRAR"), async (req, res) => {
   const { reason } = req.body ?? {};
   const transaction = await prisma.transaction.findUnique({
     where: { id: req.params.id },
@@ -981,6 +1004,12 @@ router.post("/:id/registrar-review/reject", requireAuth, requireRole("REGISTRAR"
   const voSignature = transaction.signatures.find((s) => s.role === "VILLAGE_OFFICER");
   if (!landownerSignature || !voSignature) {
     res.status(500).json({ error: "Signature chain is incomplete on this transaction" });
+    return;
+  }
+  if (reviewerIsPriorSigner(req.user!.userId, transaction)) {
+    res.status(403).json({
+      error: "You cannot review this transaction — you already signed it at an earlier stage, or created it.",
+    });
     return;
   }
 
@@ -1026,7 +1055,7 @@ router.post("/:id/registrar-review/reject", requireAuth, requireRole("REGISTRAR"
 });
 
 // POST /api/transactions/:id/registrar-review/prepare
-router.post("/:id/registrar-review/prepare", requireAuth, requireRole("REGISTRAR"), async (req, res) => {
+router.post("/:id/registrar-review/prepare", requireAuth, requireCertifiedRole("REGISTRAR"), async (req, res) => {
   const transaction = await prisma.transaction.findUnique({
     where: { id: req.params.id },
     include: transactionWithChain,
@@ -1043,6 +1072,12 @@ router.post("/:id/registrar-review/prepare", requireAuth, requireRole("REGISTRAR
   const voSignature = transaction.signatures.find((s) => s.role === "VILLAGE_OFFICER");
   if (!landownerSignature || !voSignature) {
     res.status(500).json({ error: "Signature chain is incomplete on this transaction" });
+    return;
+  }
+  if (reviewerIsPriorSigner(req.user!.userId, transaction)) {
+    res.status(403).json({
+      error: "You cannot review this transaction — you already signed it at an earlier stage, or created it.",
+    });
     return;
   }
 
@@ -1093,7 +1128,7 @@ router.post("/:id/registrar-review/prepare", requireAuth, requireRole("REGISTRAR
 });
 
 // POST /api/transactions/:id/registrar-review/submit
-router.post("/:id/registrar-review/submit", requireAuth, requireRole("REGISTRAR"), async (req, res) => {
+router.post("/:id/registrar-review/submit", requireAuth, requireCertifiedRole("REGISTRAR"), async (req, res) => {
   const { nonce, signatureValue } = req.body ?? {};
   if (typeof nonce !== "string" || !nonce.trim() || typeof signatureValue !== "string" || !signatureValue.trim()) {
     res.status(400).json({ error: "nonce and signatureValue are required" });
@@ -1116,6 +1151,12 @@ router.post("/:id/registrar-review/submit", requireAuth, requireRole("REGISTRAR"
   const voSignature = transaction.signatures.find((s) => s.role === "VILLAGE_OFFICER");
   if (!landownerSignature || !voSignature) {
     res.status(500).json({ error: "Signature chain is incomplete on this transaction" });
+    return;
+  }
+  if (reviewerIsPriorSigner(req.user!.userId, transaction)) {
+    res.status(403).json({
+      error: "You cannot review this transaction — you already signed it at an earlier stage, or created it.",
+    });
     return;
   }
 

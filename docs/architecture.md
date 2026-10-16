@@ -158,6 +158,82 @@ shared by `/api/users`, `/api/certificates/search`, and
 `POST /api/audit/anchor` — on top of, not instead of,
 `TSA_MIN_INTERVAL_SECONDS`). `server.ts` applies `helmet()` globally.
 
+## Access control
+
+Two layers, checked in order on every state-changing or privileged request:
+
+1. **Certificate-bound authorization** (`requireCertifiedRole()`,
+   `middleware/auth.ts`) — a stricter drop-in replacement for the plain
+   session-role check `requireRole()` still does for read-only lookups.
+   Run after `requireAuth`, it loads the caller's current certificate via
+   `verifyCertificate()` (`lib/ca.ts`) and requires, in order: a
+   certificate exists; it is not revoked; it is within its validity
+   window; it genuinely chains to the Issuing CA (signature and key-usage
+   checks); and the role embedded in the certificate's own `OU` field —
+   not just the database row — matches the account's session role and is
+   one of the roles the endpoint allows. Denied for any other reason, it
+   returns 403 with a short machine-readable `reason`:
+
+   | Reason | Meaning |
+   |---|---|
+   | `CERT_MISSING` | no certificate on file for this account |
+   | `CERT_REVOKED` | the certificate is revoked, or does not cryptographically chain to the Issuing CA (forged, tampered, or signed by an unknown CA — folded into this code since the practical consequence is identical) |
+   | `CERT_EXPIRED` | outside its `notBefore`/`notAfter` window |
+   | `CERT_ROLE_MISMATCH` | the certificate's own `OU` role doesn't match the session role, or isn't one this endpoint allows |
+
+   Every denial is also logged to the audit chain (`action: "ACCESS_DENIED"`,
+   with the actor, the endpoint, and the reason) before the response is
+   sent — same "a silently unlogged state change is worse than a failed
+   request" rule the rest of `lib/audit.ts` already follows.
+
+2. **Object-level access** — a valid, correctly-roled certificate only
+   proves *who* someone is; it doesn't by itself scope *which records*
+   they may touch. Enforced per route:
+   - A Landowner's own land records and transactions are the only ones
+     they can list or read; requesting another owner's record by ID
+     returns **404**, not 403, so the ID's existence is never leaked.
+   - `reviewerIsPriorSigner()` (`routes/transactions.ts`) blocks a
+     transaction's own creator — or anyone who already signed it at an
+     earlier stage — from reviewing it again at a later one. Under this
+     app's one-role-per-account model this is unreachable through the
+     live API today (role alone already keeps a Landowner account off
+     the Village Officer/Registrar endpoints), so it's exercised as a
+     direct unit test (`test/accessControl.test.ts`) rather than over
+     HTTP — kept anyway as defense in depth against a future where one
+     person could hold more than one role.
+   - An Admin can read the audit log and anchor the chain, but cannot
+     sign a land transaction at any stage (no role check on any signing
+     endpoint includes `ADMIN`).
+   - `GET /api/transactions/:id/verify` is intentionally open to any
+     authenticated user and returns public fields only (signer names,
+     roles, and valid/invalid booleans — never a password hash, wrapped
+     key, or raw signature bytes) — it is a diagnostic "prove this is
+     genuine" tool, not a privileged action.
+
+### Role x resource matrix
+
+| Resource | Landowner | Village Officer | Registrar | Admin |
+|---|---|---|---|---|
+| `POST /land-records` (create) | ✗ | ✗ | ✓ | ✗ |
+| `GET /land-records`, `/:id/history` | own records only | all | all | all |
+| `POST /transactions/prepare`, `/submit` | ✓ (own record only) | ✗ | ✗ | ✗ |
+| `GET /transactions/pending-vo` | ✗ | ✓ | ✗ | ✗ |
+| `POST /transactions/:id/vo-review/*` | ✗ | ✓ (not if a prior signer) | ✗ | ✗ |
+| `GET /transactions/pending-registrar` | ✗ | ✗ | ✓ | ✗ |
+| `POST /transactions/:id/registrar-review/*` | ✗ | ✗ | ✓ (not if a prior signer) | ✗ |
+| `GET /transactions/:id/verify` | ✓ (public fields only) | ✓ | ✓ | ✓ |
+| `POST /certificates/:id/revoke` | ✗ | ✗ | ✗ | ✓ |
+| `GET/POST /audit/*` (incl. anchor) | ✗ | ✗ | ✗ | ✓ |
+| `POST /dev/tamper/:id` (test mode) | ✗ | ✗ | ✓ | ✗ |
+
+Verified end to end by `scripts/test-access-control.ts` (the HTTP-level
+matrix) and `test/accessControl.test.ts` (`requireCertifiedRole()` and
+`reviewerIsPriorSigner()` in isolation).
+
+**Not done**: jurisdiction scoping (a Village Officer restricted to
+transactions in their own village) was scoped as optional and was not
+built in this pass — see the report for why.
+
 ## Project structure
 
 ```

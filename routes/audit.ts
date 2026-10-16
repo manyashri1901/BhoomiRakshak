@@ -28,7 +28,7 @@
 //                                  this once, for every caller).
 
 import express from "express";
-import { requireAuth, requireRole } from "../middleware/auth.ts";
+import { requireAuth, requireRole, requireCertifiedRole } from "../middleware/auth.ts";
 import { anchorRateLimiter } from "../middleware/rateLimit.ts";
 import { verifyAuditChain, getAuditHead, listAuditEntries, appendAuditEntry } from "../lib/audit.ts";
 import { anchorAuditChain, listAnchors, verifyAnchors } from "../lib/timestamp.ts";
@@ -70,7 +70,7 @@ router.get("/anchors/verify", requireAuth, requireRole("ADMIN"), async (req, res
   res.json({ results });
 });
 
-router.post("/anchor", requireAuth, requireRole("ADMIN"), anchorRateLimiter, async (_req, res) => {
+router.post("/anchor", requireAuth, requireCertifiedRole("ADMIN"), anchorRateLimiter, async (_req, res) => {
   const result = await anchorAuditChain();
   if (result.outcome === "failed") {
     // A TSA problem is an operational condition, not a client error — 502
