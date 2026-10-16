@@ -5,11 +5,14 @@ import { RoleRoute } from "./components/RoleRoute";
 import { useAuth } from "./context/AuthContext";
 import { roleHomePath } from "./lib/roleHome";
 import { HomePage } from "./pages/HomePage";
+import { HowItWorksPage } from "./pages/HowItWorksPage";
+import { AboutPage } from "./pages/AboutPage";
 import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
 import { LandownerDashboard } from "./pages/LandownerDashboard";
 import { VillageOfficerDashboard } from "./pages/VillageOfficerDashboard";
 import { RegistrarDashboard } from "./pages/RegistrarDashboard";
+import { AdminDashboard } from "./pages/AdminDashboard";
 import { LandRecordsRegistry } from "./pages/LandRecordsRegistry";
 import { LandRecordDetail } from "./pages/LandRecordDetail";
 import { CertificateLookup } from "./pages/CertificateLookup";
@@ -41,9 +44,12 @@ export default function App() {
         <Route element={<ProtectedRoute />}>
           <Route path="/land-records" element={<LandRecordsRegistry />} />
           <Route path="/land-records/:id" element={<LandRecordDetail />} />
+          {/* No :userId/:serial param — CertificateLookup is now a single,
+              state-driven page (serial input + optional name search),
+              not a per-identifier route. */}
           <Route path="/certificates" element={<CertificateLookup />} />
-          <Route path="/certificates/:userId" element={<CertificateLookup />} />
           <Route path="/verify" element={<VerifyPage />} />
+          <Route path="/how-it-works" element={<HowItWorksPage />} />
 
           <Route element={<RoleRoute allowed={["LANDOWNER"]} />}>
             <Route path="/landowner" element={<LandownerDashboard />} />
@@ -54,9 +60,13 @@ export default function App() {
           <Route element={<RoleRoute allowed={["REGISTRAR"]} />}>
             <Route path="/registrar" element={<RegistrarDashboard />} />
           </Route>
+          <Route element={<RoleRoute allowed={["ADMIN"]} />}>
+            <Route path="/admin" element={<AdminDashboard />} />
+          </Route>
         </Route>
 
         <Route path="/" element={<RootRoute />} />
+        <Route path="/about" element={<AboutPage />} />
         <Route path="*" element={<UnknownRouteRedirect />} />
       </Route>
     </Routes>

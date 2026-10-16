@@ -1,56 +1,25 @@
 // lib/signing.ts
 //
-// Generic transaction signing/verification, built on the same canonical-
-// JSON + RSA-SHA256 pattern as lib/ca.ts (see lib/canonicalize.ts — shared,
-// not duplicated). Where ca.ts signs with the CA's own key to vouch for a
-// user's identity, this module signs with a *user's* key to vouch for a
-// specific action (registering, transferring, updating a land record).
+// Transaction signature verification, built on the same canonical-JSON +
+// RSA-SHA256 pattern as lib/ca.ts (see lib/canonicalize.ts — shared, not
+// duplicated). The server never signs on a user's behalf — every
+// transaction-stage signature is produced in the browser
+// (frontend/src/lib/clientCrypto.ts) with the user's own private key,
+// unwrapped from its encrypted-at-rest form only in memory, for exactly
+// as long as it takes to sign. This module only ever verifies.
 
 import * as crypto from "node:crypto";
 import { canonicalStringify } from "./canonicalize.ts";
 
-export interface SignResult {
-  signatureValue: string;
-  dataHash: string;
-}
-
-/**
- * Signs an arbitrary transaction payload with the actor's RSA private key.
- *
- * - Canonicalize the payload so signing and later re-verification always
- *   hash/sign byte-identical input (same reasoning as certificate payloads).
- * - dataHash: explicit SHA-256 digest of the canonical payload — this is
- *   what actually gets persisted on the Signature row ("what was signed"),
- *   independent of the signature bytes themselves.
- * - signatureValue: RSA-SHA256 signature over the canonical payload,
- *   base64-encoded for storage in a TEXT column.
- */
-export function signTransaction(
-  privateKey: string,
-  transactionPayload: unknown,
-): SignResult {
-  const canonicalPayload = canonicalStringify(transactionPayload);
-  const payloadBuffer = Buffer.from(canonicalPayload, "utf8");
-
-  const dataHash = crypto
-    .createHash("sha256")
-    .update(payloadBuffer)
-    .digest("hex");
-
-  const signatureValue = crypto
-    .sign("RSA-SHA256", payloadBuffer, privateKey)
-    .toString("base64");
-
-  return { signatureValue, dataHash };
-}
-
 /**
  * Verifies that `signatureValue` is a valid RSA-SHA256 signature by the
- * holder of `publicKey` over `transactionPayload`. Rebuilds the same
- * canonical string signTransaction() would have produced for this payload
- * — if a single field differs from what was originally signed (including
- * something like a tampered documentHash), the rebuilt bytes differ and
- * verification fails, even though the signature itself is well-formed.
+ * holder of `publicKey` over `transactionPayload`. Rebuilds the canonical
+ * string from the structured payload — if a single field differs from
+ * what was originally signed (including something like a tampered
+ * documentHash), the rebuilt bytes differ and verification fails, even
+ * though the signature itself is well-formed. Used for re-verifying
+ * already-recorded signatures (GET .../verify, GET .../history) against
+ * payloads rebuilt from current DB state.
  */
 export function verifySignature(
   publicKey: string,
@@ -58,6 +27,23 @@ export function verifySignature(
   signatureValue: string,
 ): boolean {
   const canonicalPayload = canonicalStringify(transactionPayload);
+  return verifySignatureOverCanonicalString(publicKey, canonicalPayload, signatureValue);
+}
+
+/**
+ * Verifies `signatureValue` against an ALREADY-canonical string, with no
+ * canonicalStringify() step of its own. Used by the prepare -> sign ->
+ * submit flow (routes/transactions.ts): the canonical string was frozen
+ * and persisted at prepare time (lib/signingNonce.ts), so submit verifies
+ * the browser's signature against those exact stored bytes rather than
+ * re-deriving them from a client-supplied structured payload it has no
+ * reason to trust.
+ */
+export function verifySignatureOverCanonicalString(
+  publicKey: string,
+  canonicalPayload: string,
+  signatureValue: string,
+): boolean {
   const payloadBuffer = Buffer.from(canonicalPayload, "utf8");
 
   try {

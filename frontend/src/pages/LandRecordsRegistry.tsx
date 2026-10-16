@@ -4,7 +4,9 @@ import axios from "axios";
 import { listLandRecords } from "../api/landRecords";
 import { formatAreaWithConversion } from "../lib/areaUnits";
 import { LandRecordStatusBadge } from "../components/StatusBadge";
-import { EmptyState, ErrorState, LoadingState } from "../components/States";
+import { EmptyState, ErrorState } from "../components/States";
+import { PageHeader } from "../components/ui/PageHeader";
+import { SkeletonTableRows } from "../components/ui/Skeleton";
 import { useAuth } from "../context/AuthContext";
 import type { LandRecordListItem } from "../types";
 
@@ -30,26 +32,23 @@ export function LandRecordsRegistry() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div>
-        <h1 className="font-serif text-2xl font-semibold text-ink">Land Records Registry</h1>
-        <p className="mt-1 text-sm text-muted">
-          {user?.role === "LANDOWNER"
+      <PageHeader
+        title="Land Records Registry"
+        subtitle={
+          user?.role === "LANDOWNER"
             ? "Land parcels currently registered under your name."
-            : "All land parcels registered in the system."}
-        </p>
-      </div>
+            : "All land parcels registered in the system."
+        }
+      />
 
       {error && <ErrorState label={error} />}
-      {!error && records === null && <LoadingState label="Loading land records…" />}
-      {!error && records !== null && records.length === 0 && (
-        <EmptyState label="No land records found." />
-      )}
+      {!error && records !== null && records.length === 0 && <EmptyState label="No land records to show yet." />}
 
-      {!error && records !== null && records.length > 0 && (
-        <div className="overflow-x-auto rounded-lg border border-border-subtle bg-surface shadow-sm">
+      {!error && (records === null || records.length > 0) && (
+        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
           <table className="w-full min-w-160 border-collapse text-left text-sm">
-            <thead>
-              <tr className="border-b border-border-subtle bg-neutral-chip text-xs font-medium uppercase tracking-wide text-ink">
+            <thead className="sticky top-16 z-10">
+              <tr className="border-b border-slate-200 bg-slate-50 text-xs font-medium uppercase tracking-wide text-slate-600">
                 <th className="px-4 py-3">Survey No.</th>
                 <th className="px-4 py-3">Location</th>
                 <th className="px-4 py-3">Area</th>
@@ -58,21 +57,19 @@ export function LandRecordsRegistry() {
               </tr>
             </thead>
             <tbody>
-              {records.map((record) => (
-                <tr key={record.id} className="border-b border-border-subtle last:border-0 hover:bg-neutral-chip">
+              {records === null && <SkeletonTableRows rows={4} columns={5} />}
+              {records?.map((record) => (
+                <tr key={record.id} className="border-b border-slate-100 last:border-0 hover:bg-slate-50">
                   <td className="px-4 py-3">
-                    <Link
-                      to={`/land-records/${record.id}`}
-                      className="font-medium text-ink underline"
-                    >
+                    <Link to={`/land-records/${record.id}`} className="font-medium text-navy underline">
                       {record.surveyNumber}
                     </Link>
                   </td>
-                  <td className="px-4 py-3 text-ink">{record.location}</td>
-                  <td className="px-4 py-3 text-ink">
+                  <td className="px-4 py-3 text-slate-700">{record.location}</td>
+                  <td className="px-4 py-3 text-slate-700">
                     {formatAreaWithConversion(record.area, record.areaUnit)}
                   </td>
-                  <td className="px-4 py-3 text-ink">{record.currentOwnerName}</td>
+                  <td className="px-4 py-3 text-slate-700">{record.currentOwnerName}</td>
                   <td className="px-4 py-3">
                     <LandRecordStatusBadge status={record.status} />
                   </td>

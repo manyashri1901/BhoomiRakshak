@@ -17,49 +17,76 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { requireAuth } from "../middleware/auth.ts";
+import { appendAuditEntry } from "../lib/audit.ts";
+import { detectDocumentType, DOCUMENT_TYPE_EXTENSIONS } from "../lib/fileType.ts";
 
 const router = express.Router();
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
-  filename: (_req, file, cb) => {
-    // path.basename + character allowlist: file.originalname is
-    // client-controlled, so strip any directory components and anything
-    // that isn't a safe filename character before it's used to build a
-    // path on disk (prevents path traversal via a crafted filename).
-    const safeName = path
-      .basename(file.originalname)
-      .replace(/[^a-zA-Z0-9._-]/g, "_");
-    cb(null, `${randomUUID()}-${safeName}`);
-  },
-});
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20MB — sane cap for land-record documents
 
+// memoryStorage, not diskStorage: the upload must be inspected (magic
+// bytes) BEFORE anything is written to disk — a file that fails the check
+// should never touch the filesystem at all, not get written then deleted.
 const upload = multer({
-  storage,
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB — sane cap for land-record documents
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_UPLOAD_BYTES },
 });
 
-router.post("/upload", requireAuth, upload.single("file"), async (req, res) => {
+function uploadSingleFile(req: express.Request, res: express.Response, next: express.NextFunction) {
+  upload.single("file")(req, res, (err: unknown) => {
+    if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+      res.status(413).json({ error: `File exceeds the ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB limit` });
+      return;
+    }
+    if (err) {
+      next(err);
+      return;
+    }
+    next();
+  });
+}
+
+router.post("/upload", requireAuth, uploadSingleFile, async (req, res) => {
   if (!req.file) {
     res.status(400).json({ error: "file is required (multipart field name: file)" });
     return;
   }
 
-  // Hash the actual bytes written to disk — not the filename or any
-  // multer metadata — since this hash is what later gets embedded in a
-  // signed transaction payload and must reflect exactly what's on disk.
-  const fileBuffer = await fs.promises.readFile(req.file.path);
-  const documentHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
+  // The client-declared mimetype/filename are not trusted — only the
+  // actual file header bytes decide what this file is. Anything that
+  // doesn't match the PDF/PNG/JPEG allowlist is rejected before it's ever
+  // written to uploads/.
+  const documentType = detectDocumentType(req.file.buffer);
+  if (!documentType) {
+    res.status(415).json({
+      error: "Unsupported file type. Only PDF, PNG, and JPEG documents are accepted.",
+    });
+    return;
+  }
+
+  const documentHash = crypto.createHash("sha256").update(req.file.buffer).digest("hex");
+
+  // Fully random stored filename (not derived from the client-supplied
+  // originalname at all) with an extension derived from the DETECTED type,
+  // not the claimed one.
+  const storedFilename = `${randomUUID()}.${DOCUMENT_TYPE_EXTENSIONS[documentType]}`;
+  const storedPath = path.join(UPLOAD_DIR, storedFilename);
+  await fs.promises.writeFile(storedPath, req.file.buffer);
 
   // Relative path (not an absolute filesystem path) so it's portable
   // across environments and safe to store/return.
-  const documentPath = path
-    .relative(process.cwd(), req.file.path)
-    .split(path.sep)
-    .join("/");
+  const documentPath = path.relative(process.cwd(), storedPath).split(path.sep).join("/");
+
+  await appendAuditEntry({
+    action: "DOCUMENT_UPLOADED",
+    actorUserId: req.user!.userId,
+    entityType: "DOCUMENT",
+    entityId: documentPath,
+    details: { documentHash, documentType, sizeBytes: req.file.buffer.length },
+  });
 
   res.status(201).json({ documentPath, documentHash });
 });

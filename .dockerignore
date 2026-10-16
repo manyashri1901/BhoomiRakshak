@@ -1,0 +1,27 @@
+# The frontend is deployed separately (e.g. Vercel) and isn't part of the
+# API image built from the root Dockerfile.
+frontend/
+
+node_modules/
+.git/
+.gitignore
+
+# Secrets and local-only state — never baked into the image. The CA
+# falls back to keys/ for local dev only; in a container it's expected to
+# come from CA_PRIVATE_KEY_BASE64 / CA_PUBLIC_KEY_BASE64 env vars instead
+# (see lib/ca.ts and README's Deploy section).
+.env
+.env.*
+!.env.example
+keys/
+uploads/
+generated/
+
+test/
+*.md
+.vscode/
+.idea/
+
+npm-debug.log*
+*.tsbuildinfo
+coverage/

@@ -1,11 +1,21 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import axios from "axios";
+import { ClipboardList, Plus } from "lucide-react";
 import { createLandRecord } from "../api/landRecords";
-import { listPendingRegistrar, reviewAsRegistrar } from "../api/transactions";
+import {
+  listPendingRegistrar,
+  prepareRegistrarReview,
+  submitRegistrarReview,
+  rejectRegistrarReview,
+} from "../api/transactions";
 import { Card } from "../components/Card";
-import { ErrorState } from "../components/States";
 import { ReviewQueue } from "../components/ReviewQueue";
 import { UserPicker } from "../components/UserPicker";
+import { PageHeader } from "../components/ui/PageHeader";
+import { StatCard } from "../components/ui/StatCard";
+import { Button } from "../components/ui/Button";
+import { Banner } from "../components/ui/Banner";
+import { Field, fieldInputClasses } from "../components/ui/Field";
 import type { AreaUnit, TransactionWithChain, UserSummary } from "../types";
 
 export function RegistrarDashboard() {
@@ -88,28 +98,30 @@ export function RegistrarDashboard() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="font-serif text-2xl font-semibold text-ink">Registrar Queue</h1>
-        <p className="mt-1 text-sm text-muted">Seed new land records and finalize approvals.</p>
+      <PageHeader title="Registrar Queue" subtitle="Seed new land records and finalize approvals." />
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <StatCard label="Pending your approval" value={transactions?.length ?? 0} icon={ClipboardList} tone="warning" />
       </div>
 
       <Card>
-        <h2 className="font-serif text-lg font-semibold text-ink">Create Land Record</h2>
-        <p className="mt-1 text-sm text-muted">Seeds a new parcel with status ACTIVE under a landowner.</p>
+        <h2 className="text-lg font-semibold text-slate-900">Create Land Record</h2>
+        <p className="mt-1 text-sm text-slate-600">Seeds a new parcel with status ACTIVE under a landowner.</p>
 
         <form onSubmit={handleCreateLandRecord} className="mt-4 flex flex-col gap-4">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <label className="flex flex-col gap-1">
-              <span className="text-sm font-medium text-ink">Survey number</span>
+            <Field label="Survey number">
               <input
                 type="text"
                 value={surveyNumber}
                 onChange={(e) => setSurveyNumber(e.target.value)}
-                className="rounded-md border border-border-subtle px-3 py-2 text-sm outline-none focus:border-camel focus:ring-1 focus:ring-camel"
+                className={fieldInputClasses}
               />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-sm font-medium text-ink">Area</span>
+            </Field>
+            <Field
+              label="Area"
+              helperText="Indian land records are typically recorded in hectares (DILRMP standard) or acres — select the unit you're entering in."
+            >
               <div className="flex gap-2">
                 <input
                   type="number"
@@ -117,51 +129,39 @@ export function RegistrarDashboard() {
                   min="0"
                   value={area}
                   onChange={(e) => setArea(e.target.value)}
-                  className="w-full rounded-md border border-border-subtle px-3 py-2 text-sm outline-none focus:border-camel focus:ring-1 focus:ring-camel"
+                  className={`${fieldInputClasses} w-full`}
                 />
                 <select
                   value={areaUnit}
                   onChange={(e) => setAreaUnit(e.target.value as AreaUnit)}
-                  className="rounded-md border border-border-subtle bg-surface px-3 py-2 text-sm outline-none focus:border-camel focus:ring-1 focus:ring-camel"
+                  className={fieldInputClasses}
                 >
                   <option value="HECTARE">Hectare</option>
                   <option value="ACRE">Acre</option>
                 </select>
               </div>
-              <span className="text-xs text-muted" title="Indian land records are typically recorded in hectares (DILRMP standard) or acres — select the unit you're entering in.">
-                Indian land records are typically recorded in hectares (DILRMP standard) or
-                acres — select the unit you&rsquo;re entering in.
-              </span>
-            </label>
+            </Field>
           </div>
 
-          <label className="flex flex-col gap-1">
-            <span className="text-sm font-medium text-ink">Location</span>
+          <Field label="Location">
             <input
               type="text"
               value={location}
               onChange={(e) => setLocation(e.target.value)}
-              className="rounded-md border border-border-subtle px-3 py-2 text-sm outline-none focus:border-camel focus:ring-1 focus:ring-camel"
+              className={fieldInputClasses}
             />
-          </label>
+          </Field>
 
-          <label className="flex flex-col gap-1">
-            <span className="text-sm font-medium text-ink">Owner</span>
+          <Field label="Owner">
             <UserPicker role="LANDOWNER" selected={owner} onSelect={setOwner} placeholder="Search landowners by name…" />
-          </label>
+          </Field>
 
-          {formError && <ErrorState label={formError} />}
-          {successMessage && (
-            <p className="rounded-md bg-valid-chip px-3 py-2 text-sm text-dark-cocoa">{successMessage}</p>
-          )}
+          {formError && <Banner variant="danger">{formError}</Banner>}
+          {successMessage && <Banner variant="success">{successMessage}</Banner>}
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="self-start rounded-md bg-coffee px-4 py-2 text-sm font-semibold text-apricot hover:bg-coffee-hover disabled:cursor-not-allowed disabled:opacity-60"
-          >
+          <Button type="submit" loading={submitting} icon={<Plus className="h-4 w-4" aria-hidden="true" />} className="self-start">
             {submitting ? "Creating…" : "Create Land Record"}
-          </button>
+          </Button>
         </form>
       </Card>
 
@@ -171,8 +171,9 @@ export function RegistrarDashboard() {
         transactions={transactions}
         loadError={loadError}
         emptyLabel="No pending transactions."
-        onApprove={(id) => reviewAsRegistrar(id, "APPROVE")}
-        onReject={(id, reason) => reviewAsRegistrar(id, "REJECT", reason)}
+        prepareApprove={prepareRegistrarReview}
+        submitApprove={submitRegistrarReview}
+        onReject={rejectRegistrarReview}
         onDecided={load}
       />
     </div>

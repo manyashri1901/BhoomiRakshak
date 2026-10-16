@@ -2,14 +2,11 @@ import type { ReactNode } from "react";
 
 type Variant = "neutral" | "warning" | "success" | "danger";
 
-// See index.css for why each chip uses the text color it does — Camel
-// fails AA as text on any of these backgrounds, so "success" pairs its
-// camel-derived chip with Dark Cocoa text instead.
 const VARIANT_CLASSES: Record<Variant, string> = {
-  neutral: "bg-neutral-chip text-dark-cocoa",
-  warning: "bg-warning-chip text-coffee",
-  success: "bg-valid-chip text-dark-cocoa",
-  danger: "bg-danger-chip text-wax-seal",
+  neutral: "bg-slate-100 text-slate-600",
+  warning: "bg-amber-100 text-amber-700",
+  success: "bg-green-100 text-green-700",
+  danger: "bg-red-100 text-red-700",
 };
 
 export function Badge({ variant = "neutral", children }: { variant?: Variant; children: ReactNode }) {

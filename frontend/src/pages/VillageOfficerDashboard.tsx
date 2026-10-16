@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import axios from "axios";
-import { listPendingVo, reviewAsVo } from "../api/transactions";
+import { ClipboardList } from "lucide-react";
+import { listPendingVo, prepareVoReview, submitVoReview, rejectVoReview } from "../api/transactions";
 import { ReviewQueue } from "../components/ReviewQueue";
+import { PageHeader } from "../components/ui/PageHeader";
+import { StatCard } from "../components/ui/StatCard";
 import type { TransactionWithChain } from "../types";
 
 export function VillageOfficerDashboard() {
@@ -26,12 +29,13 @@ export function VillageOfficerDashboard() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="font-serif text-2xl font-semibold text-ink">Review Queue</h1>
-        <p className="mt-1 text-sm text-muted">
-          Transactions pending your review. The landowner's signature is verified live before any
-          decision is recorded.
-        </p>
+      <PageHeader
+        title="Review Queue"
+        subtitle="Transactions pending your review. The landowner's signature is verified live before any decision is recorded."
+      />
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <StatCard label="Pending your review" value={transactions?.length ?? 0} icon={ClipboardList} tone="warning" />
       </div>
 
       <ReviewQueue
@@ -40,8 +44,9 @@ export function VillageOfficerDashboard() {
         transactions={transactions}
         loadError={loadError}
         emptyLabel="No pending transactions."
-        onApprove={(id) => reviewAsVo(id, "APPROVE")}
-        onReject={(id, reason) => reviewAsVo(id, "REJECT", reason)}
+        prepareApprove={prepareVoReview}
+        submitApprove={submitVoReview}
+        onReject={rejectVoReview}
         onDecided={load}
       />
     </div>

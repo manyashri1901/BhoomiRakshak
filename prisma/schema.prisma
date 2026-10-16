@@ -14,6 +14,7 @@ enum Role {
   LANDOWNER
   VILLAGE_OFFICER
   REGISTRAR
+  ADMIN
 }
 
 enum LandRecordStatus {
@@ -42,34 +43,77 @@ enum AreaUnit {
 }
 
 model User {
-  id            String   @id @default(cuid())
-  name          String
-  email         String   @unique
-  passwordHash  String
-  role          Role
-  publicKey     String   @db.Text
-  privateKeyRef String   @db.Text
-  createdAt     DateTime @default(now())
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role
+  // The user's own RSA-2048 public key (SPKI PEM), generated in the
+  // browser at registration — see frontend/src/lib/clientCrypto.ts. The
+  // matching private key is never sent to or stored on the server in
+  // usable form; only an AES-256-GCM-wrapped copy (below), encryptable
+  // only by someone who knows the user's password, which the server never
+  // has either.
+  publicKey String @db.Text
 
-  certificate        Certificate?
+  // Wrapped private key material — null for ADMIN (admin never signs
+  // anything, so there is nothing to wrap) and for any account that
+  // predates this column. All three are base64; wrappedPrivateKey is the
+  // AES-256-GCM ciphertext of the PKCS#8 private key, wrapSalt is the
+  // PBKDF2 salt, wrapIv is the AES-GCM IV. The server can store and return
+  // this blob but has no way to decrypt it — only the browser, given the
+  // user's password, can unwrap it (see frontend/src/lib/clientCrypto.ts).
+  wrappedPrivateKey String? @db.Text
+  wrapSalt          String?
+  wrapIv            String?
+
+  createdAt DateTime @default(now())
+
+  certificate         Certificate?
   ownedLandRecords    LandRecord[]
   transactionsFrom    Transaction[] @relation("TransactionFromOwner")
   transactionsTo      Transaction[] @relation("TransactionToOwner")
   signatures          Signature[]
+  revokedCertificates Certificate[] @relation("CertificateRevokedBy")
+  auditLogs           AuditLog[]
+  signingNonces       SigningNonce[]
 
+  // Backs the certificate name-search endpoint (routes/certificates.ts),
+  // which queries with `startsWith` specifically so this index can serve
+  // it — a plain btree index doesn't accelerate a `contains` (substring)
+  // scan, only a prefix one.
+  @@index([name])
   @@map("users")
 }
 
+// Real X.509 v3 certificate, issued by the Issuing CA (lib/ca.ts) — see
+// that file for the two-tier CA hierarchy (root -> issuing -> this). The
+// old custom-JSON signed-envelope columns (publicKey, signature) are gone:
+// the public key and signature are both already inside certificatePem,
+// parsed on demand via @peculiar/x509 rather than duplicated as separate
+// columns that could drift from what was actually signed.
 model Certificate {
-  id            String   @id @default(cuid())
-  subjectUserId String   @unique
-  subject       User     @relation(fields: [subjectUserId], references: [id], onDelete: Restrict)
-  role          Role
-  publicKey     String   @db.Text
-  issuer        String   @default("BhoomiRakshak Root CA")
-  issuedAt      DateTime @default(now())
-  signature     String   @db.Text
-  fingerprint   String
+  id              String    @id @default(cuid())
+  subjectUserId   String    @unique
+  subject         User      @relation(fields: [subjectUserId], references: [id], onDelete: Restrict)
+  role            Role
+  // Hex, 128-bit (32 hex chars), top bit of the first byte cleared so it
+  // decodes as a positive ASN.1 INTEGER — see generateSerialNumber() in
+  // lib/ca.ts.
+  serialNumber    String    @unique
+  // The full signed certificate, PEM-encoded. Subject CN=<name>,
+  // OU=<role>; issuer is the Issuing CA.
+  certificatePem  String    @db.Text
+  // SHA-256 of the certificate's DER encoding (not just the public key) —
+  // kept for display/lookup convenience, same convention as before.
+  fingerprint     String
+  issuedAt        DateTime  @default(now())
+  expiresAt       DateTime
+  revoked         Boolean   @default(false)
+  revokedAt       DateTime?
+  revokedReason   String?
+  revokedByUserId String?
+  revokedBy       User?     @relation("CertificateRevokedBy", fields: [revokedByUserId], references: [id], onDelete: SetNull)
 
   @@map("certificates")
 }
@@ -125,4 +169,112 @@ model Signature {
   valid          Boolean     @default(true)
 
   @@map("signatures")
+}
+
+// Backs the prepare -> sign -> submit flow (routes/transactions.ts): a
+// prepare call freezes the exact canonical payload the server will later
+// insist on (so a submit can never substitute a different payload for the
+// one that was actually signed) and binds it to a single-use, short-lived
+// nonce. The server never trusts a client-echoed payload at submit time —
+// only this frozen copy, looked up by nonce.
+model SigningNonce {
+  id            String    @id @default(cuid())
+  nonce         String    @unique
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  // "TRANSACTION_CREATE" | "VO_REVIEW_APPROVE" | "REGISTRAR_REVIEW_APPROVE"
+  purpose       String
+  // Null for TRANSACTION_CREATE (the transaction doesn't exist yet at
+  // prepare time); set for the two review purposes so submit can confirm
+  // this nonce was actually issued for the transaction it's being used on.
+  transactionId String?
+  // The exact canonical string the browser must sign byte-for-byte —
+  // submit verifies the signature against THIS, never against anything
+  // the client sends.
+  payload       String    @db.Text
+  payloadHash   String
+  used          Boolean   @default(false)
+  usedAt        DateTime?
+  expiresAt     DateTime
+  createdAt     DateTime  @default(now())
+
+  @@map("signing_nonces")
+}
+
+// System-wide tamper-evident audit trail — separate from the Signature
+// chain (which only covers land-record transactions). Every entry's hash
+// commits to the previous entry's hash (hash = H(seq, action, actorUserId,
+// entityType, entityId, details, nonce, timestamp, prevHash)), so altering
+// or deleting any row, or inserting one out of order, breaks every hash
+// from that point forward — verifyAuditChain() (lib/audit.ts) recomputes
+// and checks this on demand, never trusting a cached flag.
+model AuditLog {
+  id            String   @id @default(cuid())
+  seq           Int      @unique
+  action        String
+  actorUserId   String?
+  // Restrict, not SetNull: actorUserId is one of the fields this row's
+  // hash commits to (see the comment above). Silently nulling it out from
+  // under a written row — which SetNull would do the moment that user is
+  // ever deleted — mutates hashed data after the fact, which looks
+  // identical to tampering when verifyAuditChain() recomputes the hash.
+  // Restrict instead makes deleting a user with audit history fail loudly,
+  // which is the correct behavior for an immutable log: you cannot delete
+  // your way out of someone's audit trail.
+  actor         User?    @relation(fields: [actorUserId], references: [id], onDelete: Restrict)
+  entityType    String
+  entityId      String?
+  // Free-form context for the action (e.g. {decision: "APPROVE"}) — never a
+  // password or private key. Always a JSON object, never SQL null, so
+  // canonicalStringify() and crypto.createHash() have the same well-defined
+  // shape to hash on every read.
+  details       Json
+  // 16 random bytes, hex-encoded — included in the hash so two entries with
+  // otherwise-identical fields (e.g. two LOGIN_FAILURE rows in the same
+  // millisecond) can never collide or be replayed as "the same" event.
+  nonce         String
+  timestamp     DateTime @default(now())
+  prevHash      String
+  hash          String
+  // Restrict (not a list of IDs) deliberately mirrors actorUserId above: an
+  // AuditAnchor's whole point is proving this exact row hasn't been deleted
+  // out from under its RFC 3161 timestamp, so the FK itself makes deleting
+  // an anchored row impossible at the database level, independent of
+  // whatever lib/timestamp.ts's own verification code checks at read time.
+  anchors       AuditAnchor[]
+
+  @@map("audit_logs")
+}
+
+// One RFC 3161 trusted-timestamp anchor over the audit chain's head hash at
+// a point in time (lib/timestamp.ts) — NOT an AuditLog entry itself, and
+// never written to inside the audit chain's own advisory-lock/hash-chain
+// mechanism (anchoring only ever reads the head via getAuditHead()).
+// Proves "this hash existed, attested by an independent third party, no
+// later than <genTime>" — independent of this server's own clock, which is
+// all `timestamp` on AuditLog itself can ever prove on its own.
+model AuditAnchor {
+  id          String   @id @default(cuid())
+  headLogId   String
+  headLog     AuditLog @relation(fields: [headLogId], references: [id], onDelete: Restrict)
+  // The AuditLog row's `hash` field, copied at anchor time — the anchor's
+  // own claim of what was anchored, checked independently of headLog's
+  // current value so a tampered row is detected by comparison, not assumed
+  // consistent via the relation alone.
+  headHash    String
+  tsaUrl      String
+  // Base64 of the full TimeStampResp's timeStampToken (CMS SignedData DER)
+  // — the one place the raw token is ever persisted. Never returned by the
+  // list endpoint (GET /api/audit/anchors); only read directly via Prisma
+  // by scripts/export-anchor-check.ts for independent `openssl ts` checks.
+  tokenBase64 String
+  genTime     DateTime
+  tsaSerial   String
+  policyOid   String
+  nonce       String
+  createdAt   DateTime @default(now())
+
+  @@index([headLogId])
+  @@index([createdAt])
+  @@map("audit_anchors")
 }

@@ -1,7 +1,11 @@
 {
   "type": "module",
   "scripts": {
-    "dev": "node server.ts"
+    "dev": "node server.ts",
+    "bootstrap-admin": "node scripts/create-first-admin.ts",
+    "first-run": "node scripts/first-run.ts",
+    "test": "node --test \"test/*.test.ts\"",
+    "attack-sim": "node scripts/attack-simulation.ts"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
@@ -10,17 +14,24 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/multer": "^2.2.0",
     "@types/node": "^26.2.0",
-    "prisma": "^7.9.1"
+    "prisma": "7.9.1"
   },
   "dependencies": {
+    "@peculiar/x509": "^2.1.0",
     "@prisma/adapter-pg": "^7.9.1",
     "@prisma/client": "^7.9.1",
+    "asn1js": "^3.0.10",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.7.1",
+    "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.2.0",
-    "pg": "^8.23.0"
+    "pg": "^8.23.0",
+    "pkijs": "^3.4.1",
+    "pvtsutils": "^1.3.6",
+    "reflect-metadata": "^0.2.2"
   }
 }

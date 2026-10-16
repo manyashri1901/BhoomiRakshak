@@ -1,4 +1,4 @@
-export type Role = "LANDOWNER" | "VILLAGE_OFFICER" | "REGISTRAR";
+export type Role = "LANDOWNER" | "VILLAGE_OFFICER" | "REGISTRAR" | "ADMIN";
 
 export interface AuthUser {
   userId: string;
@@ -33,11 +33,15 @@ export interface UserSummary {
 }
 
 // The actor embedded in a signature is deliberately narrowed server-side —
-// never passwordHash/privateKeyRef, only what verification/display need.
+// never passwordHash or wrapped key material, only what verification/display need.
+// `certificate` was already present in the JSON returned by GET /pending-vo
+// and GET /pending-registrar (see routes/transactions.ts's
+// transactionWithChain) — just not previously declared here.
 export interface ActorSummary {
   id: string;
   name: string;
   publicKey: string;
+  certificate: { fingerprint: string } | null;
 }
 
 export interface SignatureWithActor {
@@ -104,6 +108,8 @@ export interface HistorySignature {
   role: Role;
   signedAt: string;
   valid: boolean;
+  certificateValid: boolean;
+  certificateReason: string | null;
 }
 
 export interface DocumentIntegrityResult {
@@ -139,8 +145,24 @@ export interface Certificate {
   publicKey: string;
   issuer: string;
   issuedAt: string;
+  expiresAt: string;
   fingerprint: string;
+  revoked: boolean;
+  revokedAt: string | null;
+  revokedReason: string | null;
   valid: boolean;
+  reason: string | null;
+}
+
+export interface RevokedCertificateSummary {
+  certificateId: string;
+  subjectUserId: string;
+  subjectName: string;
+  role: Role;
+  fingerprint: string;
+  revokedAt: string;
+  revokedReason: string | null;
+  revokedByUserId: string | null;
 }
 
 export interface TransactionVerifyResult {
@@ -151,6 +173,7 @@ export interface TransactionVerifyResult {
     actorName: string;
     role: Role;
     certificateValid: boolean;
+    certificateReason: string | null;
   }[];
   signatureValidity: {
     actorName: string;

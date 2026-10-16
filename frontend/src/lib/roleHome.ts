@@ -9,6 +9,8 @@ export function roleHomePath(role: Role): string {
       return "/village-officer";
     case "REGISTRAR":
       return "/registrar";
+    case "ADMIN":
+      return "/admin";
   }
 }
 
@@ -16,4 +18,5 @@ export const ROLE_LABELS: Record<Role, string> = {
   LANDOWNER: "Landowner",
   VILLAGE_OFFICER: "Village Officer",
   REGISTRAR: "Registrar",
+  ADMIN: "Admin",
 };

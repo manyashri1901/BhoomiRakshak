@@ -156,4 +156,13 @@ build/
 *.pem
 *.key
 /keys
+# Explicit even though /keys above already covers it recursively: the root
+# CA private key lives nowhere else, and this directory existing in git
+# history at all would be a serious incident, so this is self-documenting
+# rather than relying only on the parent rule.
+/keys/root-offline
 /generated/prisma
+
+design/
+
+.claude/

@@ -1,14 +1,24 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
+import { CheckCircle2, Clock, Landmark, Upload } from "lucide-react";
 import { listLandRecords, getLandRecordHistory } from "../api/landRecords";
-import { createTransaction } from "../api/transactions";
+import { prepareCreateTransaction, submitCreateTransaction } from "../api/transactions";
 import { uploadDocument } from "../api/documents";
+import { signAndSubmit } from "../lib/signAndSubmit";
+import { useAuth } from "../context/AuthContext";
 import { formatAreaWithConversion } from "../lib/areaUnits";
 import { Card } from "../components/Card";
 import { LandRecordStatusBadge, TransactionStatusBadge } from "../components/StatusBadge";
 import { EmptyState, ErrorState, LoadingState } from "../components/States";
 import { UserPicker } from "../components/UserPicker";
+import { PasswordPrompt } from "../components/PasswordPrompt";
+import { PageHeader } from "../components/ui/PageHeader";
+import { StatCard } from "../components/ui/StatCard";
+import { Button } from "../components/ui/Button";
+import { Banner } from "../components/ui/Banner";
+import { Field, fieldInputClasses } from "../components/ui/Field";
+import { SkeletonTableRows } from "../components/ui/Skeleton";
 import type { HistoryTransaction, LandRecordListItem, TransactionType, UserSummary } from "../types";
 
 interface OwnedTransaction extends HistoryTransaction {
@@ -18,6 +28,7 @@ interface OwnedTransaction extends HistoryTransaction {
 const TYPES: TransactionType[] = ["REGISTRATION", "TRANSFER", "UPDATE"];
 
 export function LandownerDashboard() {
+  const { wrappedKey } = useAuth();
   const [records, setRecords] = useState<LandRecordListItem[] | null>(null);
   const [transactions, setTransactions] = useState<OwnedTransaction[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -29,6 +40,18 @@ export function LandownerDashboard() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  // Set once the document is uploaded and the form is otherwise valid —
+  // opening the password prompt is what actually triggers prepare -> sign
+  // -> submit (lib/signAndSubmit.ts) against this input.
+  const [pendingInput, setPendingInput] = useState<{
+    type: TransactionType;
+    landRecordId: string;
+    toOwnerId?: string;
+    documentPath: string;
+    documentHash: string;
+  } | null>(null);
+  const [signingOpen, setSigningOpen] = useState(false);
 
   // Guards the second wave of requests below (per-record history fetches)
   // from firing after this component has unmounted — e.g. the user logs
@@ -68,6 +91,12 @@ export function LandownerDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const stats = useMemo(() => {
+    const pending = transactions?.filter((t) => t.status === "PENDING_VO" || t.status === "PENDING_REGISTRAR").length ?? 0;
+    const approved = transactions?.filter((t) => t.status === "APPROVED").length ?? 0;
+    return { total: records?.length ?? 0, pending, approved };
+  }, [records, transactions]);
+
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setFormError(null);
@@ -89,50 +118,67 @@ export function LandownerDashboard() {
     setSubmitting(true);
     try {
       const upload = await uploadDocument(file);
-      await createTransaction({
+      setPendingInput({
         type,
         landRecordId,
         toOwnerId: type === "TRANSFER" ? toOwner!.id : undefined,
         documentPath: upload.documentPath,
         documentHash: upload.documentHash,
       });
-      setSuccessMessage("Transaction created and sent for Village Officer review.");
-      setLandRecordId("");
-      setType("REGISTRATION");
-      setToOwner(null);
-      setFile(null);
-      await loadData();
+      setSigningOpen(true);
     } catch (err) {
       setFormError(
         axios.isAxiosError(err)
-          ? (err.response?.data?.error ?? "Failed to create transaction")
-          : "Failed to create transaction",
+          ? (err.response?.data?.error ?? "Failed to upload document")
+          : "Failed to upload document",
       );
     } finally {
       setSubmitting(false);
     }
   }
 
+  async function handleSignAndSubmit(password: string) {
+    if (!pendingInput) return;
+    if (!wrappedKey) {
+      throw new Error("No signing key on this account — log out and back in, or re-register.");
+    }
+    await signAndSubmit(
+      wrappedKey,
+      password,
+      () => prepareCreateTransaction(pendingInput),
+      (nonce, signatureValue) => submitCreateTransaction(nonce, signatureValue),
+    );
+    setSigningOpen(false);
+    setSuccessMessage("Transaction created and sent for Village Officer review.");
+    setLandRecordId("");
+    setType("REGISTRATION");
+    setToOwner(null);
+    setFile(null);
+    setPendingInput(null);
+    await loadData();
+  }
+
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="font-serif text-2xl font-semibold text-ink">My Land</h1>
-        <p className="mt-1 text-sm text-muted">Your registered land parcels and their transaction activity.</p>
+      <PageHeader title="My Land" subtitle="Your registered land parcels and their transaction activity." />
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <StatCard label="Land records" value={stats.total} icon={Landmark} tone="navy" />
+        <StatCard label="Pending review" value={stats.pending} icon={Clock} tone="warning" />
+        <StatCard label="Approved" value={stats.approved} icon={CheckCircle2} tone="success" />
       </div>
 
       {loadError && <ErrorState label={loadError} />}
 
-      {!loadError && records === null && <LoadingState label="Loading your land records…" />}
-
       {!loadError && records !== null && records.length === 0 && (
-        <EmptyState label="No land records are registered under your name yet. A Registrar must create one first." />
+        <EmptyState label="Your land parcels will appear here once a Registrar registers them to you." />
       )}
 
-      {!loadError && records !== null && records.length > 0 && (
-        <div className="overflow-x-auto rounded-lg border border-border-subtle bg-surface shadow-sm">
+      {!loadError && (records === null || records.length > 0) && (
+        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
           <table className="w-full min-w-160 border-collapse text-left text-sm">
-            <thead>
-              <tr className="border-b border-border-subtle bg-neutral-chip text-xs font-medium uppercase tracking-wide text-ink">
+            <thead className="sticky top-16 z-10">
+              <tr className="border-b border-slate-200 bg-slate-50 text-xs font-medium uppercase tracking-wide text-slate-600">
                 <th className="px-4 py-3">Survey No.</th>
                 <th className="px-4 py-3">Location</th>
                 <th className="px-4 py-3">Area</th>
@@ -140,15 +186,16 @@ export function LandownerDashboard() {
               </tr>
             </thead>
             <tbody>
-              {records.map((r) => (
-                <tr key={r.id} className="border-b border-border-subtle last:border-0 hover:bg-neutral-chip">
+              {records === null && <SkeletonTableRows rows={3} columns={4} />}
+              {records?.map((r) => (
+                <tr key={r.id} className="border-b border-slate-100 last:border-0 hover:bg-slate-50">
                   <td className="px-4 py-3">
-                    <Link to={`/land-records/${r.id}`} className="font-medium text-ink underline">
+                    <Link to={`/land-records/${r.id}`} className="font-medium text-navy underline">
                       {r.surveyNumber}
                     </Link>
                   </td>
-                  <td className="px-4 py-3 text-ink">{r.location}</td>
-                  <td className="px-4 py-3 text-ink">{formatAreaWithConversion(r.area, r.areaUnit)}</td>
+                  <td className="px-4 py-3 text-slate-700">{r.location}</td>
+                  <td className="px-4 py-3 text-slate-700">{formatAreaWithConversion(r.area, r.areaUnit)}</td>
                   <td className="px-4 py-3">
                     <LandRecordStatusBadge status={r.status} />
                   </td>
@@ -161,19 +208,18 @@ export function LandownerDashboard() {
 
       {records && records.length > 0 && (
         <Card>
-          <h2 className="font-serif text-lg font-semibold text-ink">Create Transaction</h2>
-          <p className="mt-1 text-sm text-muted">
+          <h2 className="text-lg font-semibold text-slate-900">Create Transaction</h2>
+          <p className="mt-1 text-sm text-slate-600">
             Registers, transfers, or updates a land record you own. Sent for Village Officer review first.
           </p>
 
           <form onSubmit={handleSubmit} className="mt-4 flex flex-col gap-4">
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <label className="flex flex-col gap-1">
-                <span className="text-sm font-medium text-ink">Land record</span>
+              <Field label="Land record">
                 <select
                   value={landRecordId}
                   onChange={(e) => setLandRecordId(e.target.value)}
-                  className="rounded-md border border-border-subtle bg-surface px-3 py-2 text-sm outline-none focus:border-camel focus:ring-1 focus:ring-camel"
+                  className={fieldInputClasses}
                 >
                   <option value="">Select a land record…</option>
                   {records.map((r) => (
@@ -182,17 +228,16 @@ export function LandownerDashboard() {
                     </option>
                   ))}
                 </select>
-              </label>
+              </Field>
 
-              <label className="flex flex-col gap-1">
-                <span className="text-sm font-medium text-ink">Transaction type</span>
+              <Field label="Transaction type">
                 <select
                   value={type}
                   onChange={(e) => {
                     setType(e.target.value as TransactionType);
                     setToOwner(null);
                   }}
-                  className="rounded-md border border-border-subtle bg-surface px-3 py-2 text-sm outline-none focus:border-camel focus:ring-1 focus:ring-camel"
+                  className={fieldInputClasses}
                 >
                   {TYPES.map((t) => (
                     <option key={t} value={t}>
@@ -200,46 +245,44 @@ export function LandownerDashboard() {
                     </option>
                   ))}
                 </select>
-              </label>
+              </Field>
             </div>
 
             {type === "TRANSFER" && (
-              <label className="flex flex-col gap-1">
-                <span className="text-sm font-medium text-ink">New owner</span>
+              <Field label="New owner">
                 <UserPicker role="LANDOWNER" selected={toOwner} onSelect={setToOwner} placeholder="Search landowners by name…" />
-              </label>
+              </Field>
             )}
 
-            <label className="flex flex-col gap-1">
-              <span className="text-sm font-medium text-ink">Supporting document</span>
+            <Field label="Supporting document">
               <input
                 type="file"
                 onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-                className="rounded-md border border-border-subtle px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-neutral-chip file:px-3 file:py-1 file:text-sm file:font-medium file:text-ink"
+                className={`${fieldInputClasses} file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1 file:text-sm file:font-medium file:text-slate-700`}
               />
-            </label>
+            </Field>
 
-            {formError && <ErrorState label={formError} />}
-            {successMessage && (
-              <p className="rounded-md bg-valid-chip px-3 py-2 text-sm text-dark-cocoa">{successMessage}</p>
-            )}
+            {formError && <Banner variant="danger">{formError}</Banner>}
+            {successMessage && <Banner variant="success">{successMessage}</Banner>}
 
-            <button
-              type="submit"
-              disabled={submitting}
-              className="self-start rounded-md bg-coffee px-4 py-2 text-sm font-semibold text-apricot hover:bg-coffee-hover disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {submitting ? "Submitting…" : "Create Transaction"}
-            </button>
+            <Button type="submit" loading={submitting} icon={<Upload className="h-4 w-4" aria-hidden="true" />} className="self-start">
+              {submitting ? "Uploading…" : "Continue to Sign"}
+            </Button>
           </form>
         </Card>
       )}
 
       <div>
-        <h2 className="font-serif text-lg font-semibold text-ink">Your transactions</h2>
-        {transactions === null && !loadError && <LoadingState label="Loading transactions…" />}
+        <h2 className="text-lg font-semibold text-slate-900">Your transactions</h2>
+        {transactions === null && !loadError && (
+          <div className="mt-3">
+            <LoadingState label="Loading transactions…" />
+          </div>
+        )}
         {transactions !== null && transactions.length === 0 && (
-          <EmptyState label="No pending transactions." />
+          <div className="mt-3">
+            <EmptyState label="No pending transactions." />
+          </div>
         )}
         {transactions !== null && transactions.length > 0 && (
           <div className="mt-3 flex flex-col gap-2">
@@ -247,11 +290,11 @@ export function LandownerDashboard() {
               <Link
                 key={t.id}
                 to={`/land-records/${t.landRecordId}`}
-                className="flex items-center justify-between rounded-md border border-border-subtle bg-surface px-4 py-3 text-sm hover:bg-neutral-chip"
+                className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm hover:bg-slate-50"
               >
                 <span>
-                  <span className="font-medium text-ink">{t.type}</span>
-                  <span className="ml-2 text-muted">Survey No. {t.surveyNumber}</span>
+                  <span className="font-medium text-slate-900">{t.type}</span>
+                  <span className="ml-2 text-slate-500">Survey No. {t.surveyNumber}</span>
                 </span>
                 <TransactionStatusBadge status={t.status} />
               </Link>
@@ -259,6 +302,15 @@ export function LandownerDashboard() {
           </div>
         )}
       </div>
+
+      <PasswordPrompt
+        open={signingOpen}
+        title="Sign transaction"
+        description="Enter your password to unlock your signing key and submit this transaction."
+        confirmLabel="Sign & Submit"
+        onConfirm={handleSignAndSubmit}
+        onCancel={() => setSigningOpen(false)}
+      />
     </div>
   );
 }
