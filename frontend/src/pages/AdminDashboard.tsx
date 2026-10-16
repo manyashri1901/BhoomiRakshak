@@ -9,7 +9,15 @@ import {
   type AuditVerificationResult,
   type AuditChainHead,
 } from "../api/audit";
+import {
+  getAnchors,
+  verifyAnchors as verifyAnchorsApi,
+  anchorNow,
+  type AnchorSummary,
+  type AnchorVerificationResult,
+} from "../api/anchor";
 import { Card } from "../components/Card";
+import { ValidBadge } from "../components/ValidBadge";
 import { ErrorState, EmptyState } from "../components/States";
 import { UserPicker } from "../components/UserPicker";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -42,6 +50,13 @@ export function AdminDashboard() {
   const [auditChecking, setAuditChecking] = useState(false);
   const [auditError, setAuditError] = useState<string | null>(null);
 
+  const [anchors, setAnchors] = useState<AnchorSummary[] | null>(null);
+  const [anchorResults, setAnchorResults] = useState<AnchorVerificationResult[] | null>(null);
+  const [anchoring, setAnchoring] = useState(false);
+  const [anchorVerifying, setAnchorVerifying] = useState(false);
+  const [anchorMessage, setAnchorMessage] = useState<string | null>(null);
+  const [anchorError, setAnchorError] = useState<string | null>(null);
+
   const loadCrl = useCallback(() => {
     getCRL()
       .then(setCrl)
@@ -55,6 +70,64 @@ export function AdminDashboard() {
   useEffect(() => {
     loadCrl();
   }, [loadCrl]);
+
+  const loadAnchors = useCallback(() => {
+    getAnchors()
+      .then(setAnchors)
+      .catch(() => setAnchors([]));
+  }, []);
+
+  useEffect(() => {
+    loadAnchors();
+  }, [loadAnchors]);
+
+  async function handleAnchorNow() {
+    setAnchoring(true);
+    setAnchorError(null);
+    setAnchorMessage(null);
+    try {
+      const result = await anchorNow();
+      if (result.outcome === "anchored") {
+        setAnchorMessage(`Anchored at head seq ${result.headSeq} (TSA genTime ${new Date(result.genTime).toLocaleString()}).`);
+        loadAnchors();
+      } else if (result.outcome === "skipped-too-soon") {
+        setAnchorMessage(`Too soon since the last anchor — next eligible at ${new Date(result.nextEligibleAt).toLocaleString()}.`);
+      } else if (result.outcome === "skipped-empty-chain") {
+        setAnchorMessage("Nothing to anchor yet — the audit chain has no entries.");
+      }
+    } catch (err) {
+      setAnchorError(
+        axios.isAxiosError(err)
+          ? ((err.response?.data as { reason?: string } | undefined)?.reason ?? "Failed to reach the TSA")
+          : "Failed to reach the TSA",
+      );
+    } finally {
+      setAnchoring(false);
+    }
+  }
+
+  async function handleVerifyAnchors() {
+    setAnchorVerifying(true);
+    setAnchorError(null);
+    try {
+      const results = await verifyAnchorsApi();
+      setAnchorResults(results);
+    } catch (err) {
+      setAnchorError(
+        axios.isAxiosError(err) ? (err.response?.data?.error ?? "Failed to verify anchors") : "Failed to verify anchors",
+      );
+    } finally {
+      setAnchorVerifying(false);
+    }
+  }
+
+  function tsaHost(url: string): string {
+    try {
+      return new URL(url).host;
+    } catch {
+      return url;
+    }
+  }
 
   async function handleVerifyIntegrity() {
     setAuditChecking(true);
@@ -237,6 +310,75 @@ export function AdminDashboard() {
                 <CopyButton value={auditHead.hash} label="Copy head hash" />
               </div>
             )}
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <h2 className="text-lg font-semibold text-slate-900">Trusted timestamp anchors</h2>
+        <p className="mt-1 text-sm text-slate-600">
+          Periodically anchors the audit chain's head hash with a public RFC 3161 Time-Stamp
+          Authority — an independent third party attesting "this hash existed no later than this
+          time," on top of (never instead of) the chain's own tamper-evident hash links.
+        </p>
+
+        {anchors && anchors.length > 0 ? (
+          <p className="mt-3 text-sm text-slate-700">
+            Last anchored: <span className="font-medium">{new Date(anchors[0].createdAt).toLocaleString()}</span> by{" "}
+            <span className="font-medium">{tsaHost(anchors[0].tsaUrl)}</span>
+            {anchors[0].headSeq !== null && <> — covers log entry #{anchors[0].headSeq}</>}
+          </p>
+        ) : (
+          anchors !== null && <p className="mt-3 text-sm text-slate-600">No anchors yet.</p>
+        )}
+
+        <div className="mt-4 flex flex-wrap gap-3">
+          <Button onClick={handleAnchorNow} loading={anchoring} className="self-start">
+            {anchoring ? "Anchoring…" : "Anchor now"}
+          </Button>
+          <Button variant="secondary" onClick={handleVerifyAnchors} loading={anchorVerifying} className="self-start">
+            {anchorVerifying ? "Verifying…" : "Verify anchors"}
+          </Button>
+        </div>
+
+        {anchorMessage && (
+          <p className="mt-3 text-sm text-slate-600">{anchorMessage}</p>
+        )}
+        {anchorError && (
+          <div className="mt-3">
+            <ErrorState label={anchorError} />
+          </div>
+        )}
+
+        {anchorResults && (
+          <div className="mt-4 flex flex-col gap-4">
+            {anchorResults.length === 0 && <EmptyState label="No anchors to verify yet." />}
+            {anchorResults.map((result) => (
+              <div
+                key={result.anchorId}
+                className={`rounded-xl border p-4 ${
+                  result.status === "VALID" ? "border-green-200 bg-green-50" : "border-red-200 bg-red-50"
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-sm font-semibold text-slate-900">
+                    Anchored {new Date(result.genTime).toLocaleString()} — {tsaHost(result.tsaUrl)}
+                  </span>
+                  <ValidBadge valid={result.status === "VALID"} label={result.status} />
+                </div>
+                <ul className="mt-3 flex flex-col divide-y divide-slate-200">
+                  {result.steps.map((s) => (
+                    <li key={s.id} className="flex items-start justify-between gap-3 py-2">
+                      <div>
+                        <span className="text-sm font-medium text-slate-900">{s.label}</span>
+                        <p className="mt-0.5 text-sm text-slate-600">{s.detail}</p>
+                      </div>
+                      <ValidBadge valid={s.pass} label={s.pass ? "Pass" : "Fail"} />
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
           </div>
         )}
       </Card>
