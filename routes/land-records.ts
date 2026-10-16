@@ -119,8 +119,21 @@ router.get("/:id/history", requireAuth, async (req, res) => {
         orderBy: { signedAt: "asc" },
         // select, not include: true — the actor's passwordHash/wrapped key material
         // must never be fetched here even though this response strips the
-        // raw signatures array before sending (see below).
-        include: { actor: { select: { id: true, name: true, publicKey: true } } },
+        // raw signatures array before sending (see below). certificate's
+        // certificatePem is what verifySignatureChain() now derives the
+        // actor's public key from (see routes/transactions.ts's
+        // actorPublicKeyPem()) — without it, every signature here would
+        // silently verify as invalid regardless of its actual validity.
+        include: {
+          actor: {
+            select: {
+              id: true,
+              name: true,
+              publicKey: true,
+              certificate: { select: { fingerprint: true, certificatePem: true } },
+            },
+          },
+        },
       },
     },
   });

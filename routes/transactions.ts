@@ -25,7 +25,7 @@ import * as path from "node:path";
 import { prisma } from "../lib/prisma.ts";
 import { requireAuth, requireRole } from "../middleware/auth.ts";
 import { verifySignature, verifySignatureOverCanonicalString } from "../lib/signing.ts";
-import { verifyCertificate, verifyCertificateForUser } from "../lib/ca.ts";
+import { verifyCertificate, verifyCertificateForUser, publicKeyPemFromCertificatePem } from "../lib/ca.ts";
 import { createSigningNonce, consumeSigningNonce, SigningNonceError } from "../lib/signingNonce.ts";
 import { canonicalStringify } from "../lib/canonicalize.ts";
 import { appendAuditEntryTx } from "../lib/audit.ts";
@@ -51,7 +51,7 @@ interface ActorSummary {
   id: string;
   name: string;
   publicKey: string;
-  certificate: { fingerprint: string } | null;
+  certificate: { fingerprint: string; certificatePem: string } | null;
 }
 
 const router = express.Router();
@@ -77,6 +77,18 @@ async function requireCertificateFingerprint(userId: string): Promise<string> {
   const cert = await prisma.certificate.findUnique({ where: { subjectUserId: userId } });
   if (!cert) throw new Error(`No certificate on file for user ${userId}`);
   return cert.fingerprint;
+}
+
+// Every signature check below takes its public key from the actor's X.509
+// certificate (parsed on demand), never from the User.publicKey column
+// directly — the certificate is the thing that was actually signed and
+// chained, so it's the authoritative source. Returns null exactly when
+// `actor.certificate` is null (no certificate on file), the same
+// null-safety verifySignatureChain() below already applies via its
+// fingerprint check.
+function actorPublicKeyPem(actor: ActorSummary): string | null {
+  if (!actor.certificate) return null;
+  return publicKeyPemFromCertificatePem(actor.certificate.certificatePem);
 }
 
 // Exported so the transaction payload can be rebuilt identically outside
@@ -151,7 +163,7 @@ const transactionWithChain = {
           id: true,
           name: true,
           publicKey: true,
-          certificate: { select: { fingerprint: true } },
+          certificate: { select: { fingerprint: true, certificatePem: true } },
         },
       },
     },
@@ -245,8 +257,9 @@ export function verifySignatureChain(transaction: ChainableTransaction): Signatu
               reviewedAt: signature.signedAt.toISOString(),
             });
 
+    const actorKey = actorPublicKeyPem(signature.actor);
     const valid =
-      payload !== null && verifySignature(signature.actor.publicKey, payload, signature.signatureValue);
+      payload !== null && actorKey !== null && verifySignature(actorKey, payload, signature.signatureValue);
 
     return {
       signatureId: signature.id,
@@ -479,7 +492,10 @@ router.post("/submit", requireAuth, requireRole("LANDOWNER"), async (req, res) =
   }
 
   const actorId = req.user!.userId;
-  const actor = await prisma.user.findUnique({ where: { id: actorId } });
+  const actor = await prisma.user.findUnique({
+    where: { id: actorId },
+    include: { certificate: { select: { certificatePem: true } } },
+  });
   if (!actor) {
     res.status(401).json({ error: "Acting user no longer exists" });
     return;
@@ -510,8 +526,12 @@ router.post("/submit", requireAuth, requireRole("LANDOWNER"), async (req, res) =
         );
       }
 
+      const actorKeyPem = actor.certificate ? publicKeyPemFromCertificatePem(actor.certificate.certificatePem) : null;
+      if (!actorKeyPem) {
+        throw new SigningNonceError("No certificate on file for this account.");
+      }
       const signatureValid = verifySignatureOverCanonicalString(
-        actor.publicKey,
+        actorKeyPem,
         frozenPayload,
         signatureValue,
       );
@@ -599,11 +619,13 @@ async function checkLandownerSignatureValid(
   landownerSignature: TransactionWithChain["signatures"][number],
 ): Promise<PriorCheckResult> {
   const fingerprint = landownerSignature.actor.certificate?.fingerprint;
+  const landownerKey = actorPublicKeyPem(landownerSignature.actor);
   const landownerValid =
     fingerprint !== undefined &&
     fingerprint !== null &&
+    landownerKey !== null &&
     verifySignature(
-      landownerSignature.actor.publicKey,
+      landownerKey,
       rebuildCreationPayload(transaction, landownerSignature.actorId, fingerprint),
       landownerSignature.signatureValue,
     );
@@ -809,7 +831,10 @@ router.post("/:id/vo-review/submit", requireAuth, requireRole("VILLAGE_OFFICER")
     res.status(403).json({ error: `Cannot sign: ${certProblem}` });
     return;
   }
-  const vo = await prisma.user.findUnique({ where: { id: voId } });
+  const vo = await prisma.user.findUnique({
+    where: { id: voId },
+    include: { certificate: { select: { certificatePem: true } } },
+  });
   if (!vo) {
     res.status(401).json({ error: "Acting user no longer exists" });
     return;
@@ -824,7 +849,11 @@ router.post("/:id/vo-review/submit", requireAuth, requireRole("VILLAGE_OFFICER")
         transactionId: transaction.id,
       });
 
-      const signatureValid = verifySignatureOverCanonicalString(vo.publicKey, frozenPayload, signatureValue);
+      const voKeyPem = vo.certificate ? publicKeyPemFromCertificatePem(vo.certificate.certificatePem) : null;
+      if (!voKeyPem) {
+        throw new SigningNonceError("No certificate on file for this account.");
+      }
+      const signatureValid = verifySignatureOverCanonicalString(voKeyPem, frozenPayload, signatureValue);
       if (!signatureValid) {
         throw new SigningNonceError("Signature does not match the prepared payload.");
       }
@@ -882,21 +911,25 @@ async function checkPriorSignaturesValidForRegistrar(
   voSignature: TransactionWithChain["signatures"][number],
 ): Promise<PriorCheckResult> {
   const landownerFingerprint = landownerSignature.actor.certificate?.fingerprint;
+  const landownerKey = actorPublicKeyPem(landownerSignature.actor);
   const landownerValid =
     landownerFingerprint !== undefined &&
     landownerFingerprint !== null &&
+    landownerKey !== null &&
     verifySignature(
-      landownerSignature.actor.publicKey,
+      landownerKey,
       rebuildCreationPayload(transaction, landownerSignature.actorId, landownerFingerprint),
       landownerSignature.signatureValue,
     );
 
   const voFingerprint = voSignature.actor.certificate?.fingerprint;
+  const voKey = actorPublicKeyPem(voSignature.actor);
   const voValid =
     voFingerprint !== undefined &&
     voFingerprint !== null &&
+    voKey !== null &&
     verifySignature(
-      voSignature.actor.publicKey,
+      voKey,
       buildReviewPayload({
         transactionId: transaction.id,
         type: transaction.type,
@@ -1098,7 +1131,10 @@ router.post("/:id/registrar-review/submit", requireAuth, requireRole("REGISTRAR"
     res.status(403).json({ error: `Cannot sign: ${certProblem}` });
     return;
   }
-  const registrar = await prisma.user.findUnique({ where: { id: registrarId } });
+  const registrar = await prisma.user.findUnique({
+    where: { id: registrarId },
+    include: { certificate: { select: { certificatePem: true } } },
+  });
   if (!registrar) {
     res.status(401).json({ error: "Acting user no longer exists" });
     return;
@@ -1113,7 +1149,13 @@ router.post("/:id/registrar-review/submit", requireAuth, requireRole("REGISTRAR"
         transactionId: transaction.id,
       });
 
-      const signatureValid = verifySignatureOverCanonicalString(registrar.publicKey, frozenPayload, signatureValue);
+      const registrarKeyPem = registrar.certificate
+        ? publicKeyPemFromCertificatePem(registrar.certificate.certificatePem)
+        : null;
+      if (!registrarKeyPem) {
+        throw new SigningNonceError("No certificate on file for this account.");
+      }
+      const signatureValid = verifySignatureOverCanonicalString(registrarKeyPem, frozenPayload, signatureValue);
       if (!signatureValid) {
         throw new SigningNonceError("Signature does not match the prepared payload.");
       }

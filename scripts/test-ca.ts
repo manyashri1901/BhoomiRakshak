@@ -60,7 +60,8 @@ async function main() {
     publicKey,
   });
   console.log("3. Issued certificate:", certificate.id);
-  console.log("   Signature (base64, truncated):", certificate.signature.slice(0, 40) + "...");
+  console.log("   Serial number:", certificate.serialNumber);
+  console.log("   Certificate PEM (first line):", certificate.certificatePem.split("\n")[0]);
   console.log("   Fingerprint:", certificate.fingerprint);
 
   // 4. Verify the certificate against the CA's public key.

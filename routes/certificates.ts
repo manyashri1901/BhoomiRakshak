@@ -4,26 +4,26 @@
 //                                          every revoked certificate (plain,
 //                                          unsigned — feeds the Admin UI's
 //                                          CRL table only).
-// GET  /api/certificates/ca             — the CA's own public key + fingerprint,
-//                                          so the browser can verify certificate
-//                                          and CRL signatures itself.
-// GET  /api/certificates/crl/signed     — a CA-signed, freshness-bounded CRL
+// GET  /api/certificates/ca             — the root + issuing CA certificates
+//                                          (PEM, public), so the browser can
+//                                          verify the full chain itself.
+// GET  /api/certificates/crl/signed     — a real, CA-signed X.509 CRL (PEM)
 //                                          for the browser's own verification.
 // GET  /api/certificates/search         — name search, VO/Registrar/Admin only.
-// GET  /api/certificates/serial/:id     — exact lookup by certificate id
-//                                          ("serial"), public fields only,
-//                                          immutably cacheable.
+// GET  /api/certificates/serial/:serial — exact lookup by the certificate's
+//                                          real X.509 serial number, public
+//                                          fields only, immutably cacheable.
 // POST /api/certificates/:id/revoke     — ADMIN-only. Revokes a certificate
 //                                          by its own id (not the subject's
-//                                          user id).
+//                                          user id, and not its serial).
 // GET  /api/certificates/:userId        — legacy lookup by SUBJECT USER id
-//                                          (not a certificate id). Left
-//                                          exactly as it was — AdminDashboard's
+//                                          (not a certificate id or serial).
+//                                          Left working — AdminDashboard's
 //                                          revoke flow depends on this exact
 //                                          shape (getCertificateByUserId).
 //
 // Route order matters: every specific path below (/crl, /crl/signed, /ca,
-// /search, /serial/:id) must be declared before the generic /:userId
+// /search, /serial/:serial) must be declared before the generic /:userId
 // catch-all, or Express would swallow e.g. "ca" as a userId value.
 
 import express from "express";
@@ -35,8 +35,9 @@ import {
   verifyCertificate,
   revokeCertificate,
   getCRL,
-  getCAPublicCertificate,
+  getCAPublicCertificates,
   getSignedCRL,
+  publicKeyPemFromCertificatePem,
 } from "../lib/ca.ts";
 import type { Role } from "../generated/prisma/enums.ts";
 
@@ -53,11 +54,11 @@ router.get("/crl", requireAuth, async (_req, res) => {
   res.json(crl);
 });
 
-// GET /api/certificates/crl/signed — a CA-signed, thisUpdate/nextUpdate
-// -bounded CRL for the browser's own verification (frontend/src/lib/
-// certificateVerify.ts). Cache-Control's max-age is computed from the
-// CRL's own stated freshness window, not a flat constant — a cached copy
-// is never served past the moment the CRL itself says it goes stale.
+// GET /api/certificates/crl/signed — a real, CA-signed X.509 CRL for the
+// browser's own verification (frontend/src/lib/certificateVerify.ts).
+// Cache-Control's max-age is computed from the CRL's own stated freshness
+// window, not a flat constant — a cached copy is never served past the
+// moment the CRL itself says it goes stale.
 router.get("/crl/signed", requireAuth, async (_req, res) => {
   const signedCrl = await getSignedCRL();
   const secondsUntilNextUpdate = Math.max(
@@ -68,19 +69,20 @@ router.get("/crl/signed", requireAuth, async (_req, res) => {
   res.json(signedCrl);
 });
 
-// GET /api/certificates/ca — the CA's own public identity. Authenticated
-// for consistency with every other route in this app, not because the CA
-// public key is itself sensitive (it isn't — it's meant to be public).
+// GET /api/certificates/ca — the root + issuing CA certificates (public).
+// Authenticated for consistency with every other route in this app, not
+// because these certificates are themselves sensitive (they aren't —
+// they're meant to be public).
 //
 // IMPORTANT caveat, not solved here: fetching this from the same server
 // that issued the certificates you're about to verify with it does not by
 // itself establish trust — a server that could forge certificates could
-// just as easily serve a forged "CA public key" to match. In a real
-// deployment the CA's public key (or its fingerprint) would be pinned
+// just as easily serve forged "CA certificates" to match. In a real
+// deployment the root certificate (or its fingerprint) would be pinned
 // into the client application / OS trust store out-of-band, not fetched
 // live from the thing it's meant to be checking.
-router.get("/ca", requireAuth, (_req, res) => {
-  res.json(getCAPublicCertificate());
+router.get("/ca", requireAuth, async (_req, res) => {
+  res.json(await getCAPublicCertificates());
 });
 
 // GET /api/certificates/search?q=&cursor= — name search. Restricted to
@@ -88,11 +90,7 @@ router.get("/ca", requireAuth, (_req, res) => {
 // browse other identities by name — they only ever need to check one
 // specific certificate they already have the serial for). Keyset
 // (cursor), not offset, pagination: ordered by (name, id), keyed by the
-// last row's own (name, id) tuple, backed by the users_name_idx index —
-// an offset-based "page N of everyone" approach doesn't scale and still
-// allows crawling the full table page by page even capped at 10/page;
-// keyset pagination combined with the 3-character minimum keeps every
-// single query cheap and bounded regardless of table size.
+// last row's own (name, id) tuple, backed by the users_name_idx index.
 router.get(
   "/search",
   requireAuth,
@@ -127,7 +125,7 @@ router.get(
         certificate: { isNot: null },
         ...cursorCondition,
       },
-      select: { id: true, name: true, role: true, certificate: { select: { id: true } } },
+      select: { id: true, name: true, role: true, certificate: { select: { serialNumber: true } } },
       orderBy: [{ name: "asc" }, { id: "asc" }],
       take: SEARCH_PAGE_SIZE + 1,
     });
@@ -146,33 +144,31 @@ router.get(
     });
 
     res.json({
-      // serial, not the user id — the next step for whoever picks a
-      // result is GET /serial/:id, which takes a certificate id.
-      results: page.map((row) => ({ serial: row.certificate!.id, name: row.name, role: row.role })),
+      // The real X.509 serial, not the user id or the certificate's own
+      // cuid — the next step for whoever picks a result is GET
+      // /serial/:serial, which takes a serial number.
+      results: page.map((row) => ({ serial: row.certificate!.serialNumber, name: row.name, role: row.role })),
       nextCursor,
     });
   },
 );
 
-// GET /api/certificates/serial/:id — exact lookup by the certificate's OWN
-// id (the closest analogue this custom-JSON PKI has to an X.509 serial
-// number — NOT the subject's user id, since a user can be reissued a new
-// certificate after revocation and "lookup by user id" would be ambiguous
-// about which one). Any authenticated user.
+// GET /api/certificates/serial/:serial — exact lookup by the certificate's
+// real X.509 serial number. Any authenticated user.
 //
-// Returns ONLY the raw signed envelope — subject/name/role/publicKey/
-// issuer/issuedAt/expiresAt/signature plus the serial itself — and
-// deliberately nothing the server has computed (no valid/reason/revoked
-// verdict): the browser verifies signature, validity window, and
-// revocation itself (frontend/src/lib/certificateVerify.ts). Because
-// nothing in this response can ever change after issuance (revocation
-// status lives only in the separately-fetched, short-lived signed CRL),
-// it's safe to cache as `immutable`. `private`, not `public`, because this
-// is still an authenticated route — a shared/corporate cache must not
-// store it on the authenticated user's behalf.
-router.get("/serial/:id", requireAuth, directoryLookupRateLimiter, async (req, res) => {
+// Returns ONLY the raw certificate PEM (plus the issuing CA's own PEM, so
+// the browser can verify the chain without a second request) — nothing
+// the server has computed (no valid/reason/revoked verdict): the browser
+// verifies the full chain, validity, CRL freshness, and revocation itself
+// (frontend/src/lib/certificateVerify.ts). Because the certificate PEM
+// itself can never change after issuance (revocation status lives only in
+// the separately-fetched, short-lived signed CRL), it's safe to cache as
+// `immutable`. `private`, not `public`, because this is still an
+// authenticated route — a shared/corporate cache must not store it on the
+// authenticated user's behalf.
+router.get("/serial/:serial", requireAuth, directoryLookupRateLimiter, async (req, res) => {
   const cert = await prisma.certificate.findUnique({
-    where: { id: req.params.id },
+    where: { serialNumber: req.params.serial },
     include: { subject: { select: { name: true } } },
   });
 
@@ -181,25 +177,21 @@ router.get("/serial/:id", requireAuth, directoryLookupRateLimiter, async (req, r
     return;
   }
 
+  const { issuingCertPem } = await getCAPublicCertificates();
+
   await appendAuditEntry({
     action: "CERTIFICATE_LOOKUP",
     actorUserId: req.user!.userId,
     entityType: "CERTIFICATE",
     entityId: cert.id,
-    details: { serial: cert.id },
+    details: { serialNumber: cert.serialNumber },
   });
 
   res.set("Cache-Control", "private, max-age=31536000, immutable");
   res.json({
-    serial: cert.id,
-    subject: cert.subjectUserId,
-    name: cert.subject.name,
-    role: cert.role,
-    publicKey: cert.publicKey,
-    issuer: cert.issuer,
-    issuedAt: cert.issuedAt,
-    expiresAt: cert.expiresAt,
-    signature: cert.signature,
+    serialNumber: cert.serialNumber,
+    certificatePem: cert.certificatePem,
+    issuingCertificatePem: issuingCertPem,
   });
 });
 
@@ -251,8 +243,9 @@ router.get("/:userId", requireAuth, async (req, res) => {
     subjectUserId: certificate.subjectUserId,
     subjectName: certificate.subject.name,
     role: certificate.role,
-    publicKey: certificate.publicKey,
-    issuer: certificate.issuer,
+    publicKey: publicKeyPemFromCertificatePem(certificate.certificatePem),
+    serialNumber: certificate.serialNumber,
+    issuer: details.issuer,
     issuedAt: certificate.issuedAt,
     expiresAt: certificate.expiresAt,
     fingerprint: certificate.fingerprint,

@@ -86,17 +86,29 @@ model User {
   @@map("users")
 }
 
+// Real X.509 v3 certificate, issued by the Issuing CA (lib/ca.ts) — see
+// that file for the two-tier CA hierarchy (root -> issuing -> this). The
+// old custom-JSON signed-envelope columns (publicKey, signature) are gone:
+// the public key and signature are both already inside certificatePem,
+// parsed on demand via @peculiar/x509 rather than duplicated as separate
+// columns that could drift from what was actually signed.
 model Certificate {
   id              String    @id @default(cuid())
   subjectUserId   String    @unique
   subject         User      @relation(fields: [subjectUserId], references: [id], onDelete: Restrict)
   role            Role
-  publicKey       String    @db.Text
-  issuer          String    @default("BhoomiRakshak Root CA")
+  // Hex, 128-bit (32 hex chars), top bit of the first byte cleared so it
+  // decodes as a positive ASN.1 INTEGER — see generateSerialNumber() in
+  // lib/ca.ts.
+  serialNumber    String    @unique
+  // The full signed certificate, PEM-encoded. Subject CN=<name>,
+  // OU=<role>; issuer is the Issuing CA.
+  certificatePem  String    @db.Text
+  // SHA-256 of the certificate's DER encoding (not just the public key) —
+  // kept for display/lookup convenience, same convention as before.
+  fingerprint     String
   issuedAt        DateTime  @default(now())
   expiresAt       DateTime
-  signature       String    @db.Text
-  fingerprint     String
   revoked         Boolean   @default(false)
   revokedAt       DateTime?
   revokedReason   String?

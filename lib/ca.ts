@@ -2,254 +2,390 @@
 //
 // BhoomiRakshak Certificate Authority (CA) module.
 //
-// This implements a minimal, self-hosted PKI:
-//   - A single root CA key pair (RSA-2048) acts as the trust anchor.
-//   - Every registered user (Landowner / Village Officer / Registrar) gets
-//     their own RSA-2048 key pair.
-//   - The CA "issues" a certificate by signing a canonical JSON payload that
-//     binds a user's identity (id, name, role) to their public key.
-//   - Anyone holding the CA's public key can later verify that a
-//     certificate was really issued by this CA and has not been tampered
-//     with, without needing to trust the database.
+// A real, two-tier X.509 v3 PKI, built with @peculiar/x509 (no hand-rolled
+// ASN.1 anywhere in this codebase):
+//   - A ROOT CA (self-signed, CA:true, pathLen:1) is the trust anchor.
+//     Its private key is generated once by scripts/first-run.ts, written
+//     ONLY to keys/root-offline/root-ca-private.pem, and never loaded by
+//     this running server again — see ensureIssuingCA() below, which
+//     loads the issuing key + both certs, never the root key.
+//   - An ISSUING CA (signed by the root, CA:true, pathLen:0) is what this
+//     server actually holds and signs with day to day.
+//   - Every registered user gets a leaf certificate (CA:false,
+//     KeyUsage digitalSignature) signed by the Issuing CA, subject
+//     CN=<name>, OU=<role>, with a CRL Distribution Point extension
+//     pointing at this server's signed-CRL endpoint.
 //
-// All crypto here uses Node's built-in `crypto` module (no external
-// dependencies) with RSA + SHA-256, matching the schema's design.
+// Revocation is published as a real, CA-signed X.509 CRL (getSignedCRL())
+// — see the long comment there for caching and freshness.
 
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as crypto from "node:crypto";
+import { webcrypto } from "node:crypto";
+// Must be imported before "@peculiar/x509" below: it carries the
+// `import "reflect-metadata"` polyfill @peculiar/x509's own tsyringe
+// dependency requires at load time, not just before first use — importing
+// "@peculiar/x509" first (even transitively) throws immediately.
+import { RSA_SIGNING_ALGORITHM, generateRsaKeyPairPem, importPrivateKeyPem } from "./x509Keys.ts";
+import * as x509 from "@peculiar/x509";
 import { prisma } from "./prisma.ts";
 import { canonicalStringify } from "./canonicalize.ts";
 import { appendAuditEntry } from "./audit.ts";
 import type { Role } from "../generated/prisma/enums.ts";
 
 // ---------------------------------------------------------------------------
-// 1. ROOT CA KEY PAIR
+// 1. KEY / CERTIFICATE FILE LAYOUT
 // ---------------------------------------------------------------------------
 
-const CA_DIR = path.join(process.cwd(), "keys");
-const CA_PRIVATE_KEY_PATH = path.join(CA_DIR, "ca-private.pem");
-const CA_PUBLIC_KEY_PATH = path.join(CA_DIR, "ca-public.pem");
+// CA_KEYS_DIR lets a caller point this module at a throwaway directory
+// instead of the real keys/ (scripts/test-first-run-e2e.ts does this, to
+// prove the bootstrap flow works from scratch without touching real key
+// material) — must be set before this module is first imported, since
+// these paths are resolved once at module load.
+const CA_DIR = process.env.CA_KEYS_DIR ? path.resolve(process.env.CA_KEYS_DIR) : path.join(process.cwd(), "keys");
+const ROOT_OFFLINE_DIR = path.join(CA_DIR, "root-offline");
 
-const CA_ISSUER_NAME = "BhoomiRakshak Root CA";
+// Written ONCE by first-run, read ONLY by first-run (to re-derive the
+// issuing cert if it's ever regenerated) and by scripts/export-cert-check.ts
+// for the interoperability proof. The running server (ensureIssuingCA()
+// below) never opens this path.
+const ROOT_PRIVATE_KEY_PATH = path.join(ROOT_OFFLINE_DIR, "root-ca-private.pem");
+// The root's CERTIFICATE (public) — this one the server does load, as the
+// top of the chain it verifies against.
+const ROOT_CERT_PATH = path.join(CA_DIR, "root-ca-cert.pem");
+const ISSUING_PRIVATE_KEY_PATH = path.join(CA_DIR, "issuing-ca-private.pem");
+const ISSUING_CERT_PATH = path.join(CA_DIR, "issuing-ca-cert.pem");
 
-// Certificates are valid for one year from issuance. This bounds how long a
-// compromised or orphaned key pair stays trusted even if it's never
-// explicitly revoked — the other half of revocation (see
-// revokeCertificate/CRL below), not a replacement for it.
-const CERT_VALIDITY_DAYS = 365;
+const ROOT_SUBJECT = "CN=BhoomiRakshak Root CA";
+const ISSUING_SUBJECT = "CN=BhoomiRakshak Issuing CA";
 
-interface KeyPairPem {
-  publicKey: string;
-  privateKey: string;
-}
+const ROOT_VALIDITY_DAYS = 3650; // 10 years
+const ISSUING_VALIDITY_DAYS = 1825; // 5 years
+const CERT_VALIDITY_DAYS = 365; // 1 year — unchanged from before
 
-// Module-level cache so we only touch the filesystem once per process,
-// even if ensureRootCA() is called on every request.
-let cachedRootCA: KeyPairPem | null = null;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
-/**
- * Generates a fresh RSA-2048 key pair, PEM-encoded.
- *
- * - modulusLength: 2048  -> the RSA key size in bits. 2048 is the current
- *   practical minimum for RSA (matches the assignment brief); 3072/4096
- *   would be stronger but slower to sign/verify.
- * - publicKeyEncoding:  SPKI  (SubjectPublicKeyInfo) — the standard X.509
- *   container format for public keys.
- * - privateKeyEncoding: PKCS#8 — the standard container format for
- *   private keys (algorithm-agnostic, unlike the older PKCS#1).
- * - Both are exported as PEM (base64 text wrapped with BEGIN/END headers)
- *   so they can be stored as plain text files / DB text columns.
- */
-function generateRsaKeyPair(): KeyPairPem {
-  const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    publicKeyEncoding: { type: "spki", format: "pem" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  return { publicKey, privateKey };
+function addDays(date: Date, days: number): Date {
+  return new Date(date.getTime() + days * DAY_MS);
 }
 
 function decodeBase64Pem(value: string): string {
   return Buffer.from(value, "base64").toString("utf8");
 }
 
+// ---------------------------------------------------------------------------
+// 2. SERIAL NUMBERS
+// ---------------------------------------------------------------------------
+
 /**
- * Loads the root CA key pair — from environment variables first, falling
- * back to disk (generating it on first run) only if those aren't set.
- *
- * This is the CA's own identity: every certificate issued by
- * issueCertificate() is signed with `privateKey`, and every verification in
- * verifyCertificate() checks against `publicKey`. Losing ca-private.pem
- * means losing the ability to issue new trusted certificates; leaking it
- * means an attacker could forge certificates, so keys/ must never be
- * committed to git (see .gitignore).
- *
- * CA_PRIVATE_KEY_BASE64 / CA_PUBLIC_KEY_BASE64 (base64 of the PEM text, to
- * sidestep every platform's own quirks around multi-line env var values)
- * exist for Render and similar hosts, whose disk is ephemeral — a key
- * generated to keys/ on one deploy would vanish on the next, invalidating
- * every certificate issued under it. Store these as the platform's
- * *secret* env vars, never plain ones, and never log their values (see
- * scripts/first-run.ts, the only place that ever prints them, once, for
- * you to copy into that secret store). Local development has no such
- * constraint, so it's untouched: no env vars set, keys/ persists on disk
- * exactly as before.
+ * A random 128-bit serial, hex-encoded (32 characters) — the top bit of
+ * the first byte is cleared so the value decodes as a positive ASN.1
+ * INTEGER (an odd-length/high-bit-set hex string gets silently padded
+ * with a leading zero byte by the DER encoder, which would silently
+ * change a 16-byte value into a 17-byte one; clearing the bit up front
+ * avoids that entirely rather than relying on it).
  */
-export function ensureRootCA(): KeyPairPem {
-  if (cachedRootCA) return cachedRootCA;
+function generateSerialNumber(): string {
+  const bytes = crypto.randomBytes(16);
+  bytes[0] &= 0x7f;
+  return bytes.toString("hex");
+}
 
-  const envPrivateKey = process.env.CA_PRIVATE_KEY_BASE64;
-  const envPublicKey = process.env.CA_PUBLIC_KEY_BASE64;
-  if (envPrivateKey && envPublicKey) {
-    cachedRootCA = {
-      privateKey: decodeBase64Pem(envPrivateKey),
-      publicKey: decodeBase64Pem(envPublicKey),
-    };
-    return cachedRootCA;
+// ---------------------------------------------------------------------------
+// 3. CA BOOTSTRAP (scripts/first-run.ts only) AND RUNTIME LOADING
+// ---------------------------------------------------------------------------
+
+export interface BootstrapResult {
+  rootGenerated: boolean;
+  issuingGenerated: boolean;
+  // Only the ROOT CERTIFICATE (public) is ever returned for the root tier
+  // — deliberately no rootPrivateKeyBase64 field exists anywhere on this
+  // type, so there is no code path by which the root private key could
+  // ever be logged, printed, or returned to a caller: it is written
+  // straight to keys/root-offline/root-ca-private.pem inside this
+  // function and nowhere else, full stop. The issuing key DOES get
+  // returned (as base64, only when freshly generated) because the
+  // deployment story requires an operator to be able to copy it into a
+  // secret store — scripts/first-run.ts prints it once, loudly, exactly
+  // like the single-tier CA this replaces did for its one key.
+  rootCertBase64?: string;
+  issuingPrivateKeyBase64?: string;
+  issuingCertBase64?: string;
+}
+
+/**
+ * Generates the root and/or issuing CA if either is missing, writing the
+ * root private key ONLY to keys/root-offline/ and discarding it from
+ * memory immediately after it signs the issuing certificate — it is never
+ * cached at module level the way the issuing key is (see
+ * ensureIssuingCA()). Safe to call on every deploy: a no-op for whichever
+ * tier already exists on disk or via env vars.
+ */
+export async function bootstrapCAHierarchy(): Promise<BootstrapResult> {
+  const result: BootstrapResult = { rootGenerated: false, issuingGenerated: false };
+
+  const envRootCert = process.env.ROOT_CA_CERT_BASE64;
+  const rootCertExists = Boolean(envRootCert) || fs.existsSync(ROOT_CERT_PATH);
+  const envIssuing =
+    process.env.ISSUING_CA_PRIVATE_KEY_BASE64 && process.env.ISSUING_CA_CERT_BASE64;
+  const issuingExists = Boolean(envIssuing) || (fs.existsSync(ISSUING_PRIVATE_KEY_PATH) && fs.existsSync(ISSUING_CERT_PATH));
+
+  if (issuingExists) {
+    // Nothing to do — whatever is missing (root cert alone, without a
+    // reason to regenerate issuing) isn't this function's job to fix;
+    // ensureIssuingCA() will simply fail loudly if the root cert is
+    // genuinely absent, which first-run's own checks should have caught.
+    return result;
   }
 
-  const alreadyExists =
-    fs.existsSync(CA_PRIVATE_KEY_PATH) && fs.existsSync(CA_PUBLIC_KEY_PATH);
+  // Need to generate the issuing CA, which means we need the root's
+  // PRIVATE key to sign it — generate the root fresh if it doesn't
+  // already have a private key available offline.
+  let rootPrivateKey: CryptoKey;
+  let rootCert: x509.X509Certificate;
 
-  if (alreadyExists) {
-    cachedRootCA = {
-      privateKey: fs.readFileSync(CA_PRIVATE_KEY_PATH, "utf8"),
-      publicKey: fs.readFileSync(CA_PUBLIC_KEY_PATH, "utf8"),
-    };
-    return cachedRootCA;
+  if (rootCertExists && fs.existsSync(ROOT_PRIVATE_KEY_PATH)) {
+    // Root already bootstrapped in a prior run on this machine (unusual —
+    // normally root-offline/ has been moved off-box by now — but still
+    // supported for local dev convenience).
+    rootPrivateKey = await importPrivateKeyPem(fs.readFileSync(ROOT_PRIVATE_KEY_PATH, "utf8"));
+    rootCert = new x509.X509Certificate(
+      envRootCert ? decodeBase64Pem(envRootCert) : fs.readFileSync(ROOT_CERT_PATH, "utf8"),
+    );
+  } else if (rootCertExists) {
+    // The root certificate is known (e.g. via ROOT_CA_CERT_BASE64) but its
+    // private key is not available here — this deployment cannot sign a
+    // new issuing CA; it must receive ISSUING_CA_PRIVATE_KEY_BASE64 from
+    // wherever the root key actually lives instead.
+    throw new Error(
+      "Root CA certificate is present but its private key is not available in this environment — " +
+        "cannot generate a new Issuing CA here. Set ISSUING_CA_PRIVATE_KEY_BASE64/ISSUING_CA_CERT_BASE64 " +
+        "instead, generated wherever the root private key actually lives.",
+    );
+  } else {
+    const generated = await generateRsaKeyPairPem();
+    rootPrivateKey = generated.keyPair.privateKey;
+    const notBefore = new Date();
+    rootCert = await x509.X509CertificateGenerator.createSelfSigned({
+      serialNumber: generateSerialNumber(),
+      name: ROOT_SUBJECT,
+      notBefore,
+      notAfter: addDays(notBefore, ROOT_VALIDITY_DAYS),
+      signingAlgorithm: RSA_SIGNING_ALGORITHM,
+      keys: generated.keyPair,
+      extensions: [
+        new x509.BasicConstraintsExtension(true, 1, true),
+        new x509.KeyUsagesExtension(x509.KeyUsageFlags.keyCertSign | x509.KeyUsageFlags.cRLSign, true),
+        await x509.SubjectKeyIdentifierExtension.create(generated.keyPair.publicKey),
+      ],
+    });
+
+    fs.mkdirSync(ROOT_OFFLINE_DIR, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(ROOT_PRIVATE_KEY_PATH, generated.pem.privateKey, { mode: 0o600 });
+    fs.mkdirSync(CA_DIR, { recursive: true });
+    fs.writeFileSync(ROOT_CERT_PATH, rootCert.toString("pem"), { mode: 0o644 });
+
+    result.rootGenerated = true;
+    result.rootCertBase64 = Buffer.from(rootCert.toString("pem"), "utf8").toString("base64");
   }
 
-  const keyPair = generateRsaKeyPair();
+  // Generate the issuing CA, signed by the root key above (which only
+  // ever exists in this function's local scope — nothing module-level
+  // retains it after this function returns).
+  const issuingKeys = (await webcrypto.subtle.generateKey(RSA_SIGNING_ALGORITHM, true, [
+    "sign",
+    "verify",
+  ])) as CryptoKeyPair;
+  const issuingNotBefore = new Date();
+  const issuingCert = await x509.X509CertificateGenerator.create({
+    serialNumber: generateSerialNumber(),
+    subject: ISSUING_SUBJECT,
+    issuer: rootCert.subject,
+    notBefore: issuingNotBefore,
+    notAfter: addDays(issuingNotBefore, ISSUING_VALIDITY_DAYS),
+    signingAlgorithm: RSA_SIGNING_ALGORITHM,
+    publicKey: issuingKeys.publicKey,
+    signingKey: rootPrivateKey,
+    extensions: [
+      new x509.BasicConstraintsExtension(true, 0, true),
+      new x509.KeyUsagesExtension(x509.KeyUsageFlags.keyCertSign | x509.KeyUsageFlags.cRLSign, true),
+      await x509.SubjectKeyIdentifierExtension.create(issuingKeys.publicKey),
+    ],
+  });
+  const issuingPrivateKeyDer = await webcrypto.subtle.exportKey("pkcs8", issuingKeys.privateKey);
+  const issuingPrivateKeyPem = `-----BEGIN PRIVATE KEY-----\n${Buffer.from(issuingPrivateKeyDer)
+    .toString("base64")
+    .match(/.{1,64}/g)!
+    .join("\n")}\n-----END PRIVATE KEY-----\n`;
 
   fs.mkdirSync(CA_DIR, { recursive: true });
-  // mode 0o600: owner read/write only (POSIX; a no-op on Windows, but
-  // correct and worth stating in a viva as the intended production posture).
-  fs.writeFileSync(CA_PRIVATE_KEY_PATH, keyPair.privateKey, { mode: 0o600 });
-  fs.writeFileSync(CA_PUBLIC_KEY_PATH, keyPair.publicKey, { mode: 0o644 });
+  fs.writeFileSync(ISSUING_PRIVATE_KEY_PATH, issuingPrivateKeyPem, { mode: 0o600 });
+  fs.writeFileSync(ISSUING_CERT_PATH, issuingCert.toString("pem"), { mode: 0o644 });
 
-  cachedRootCA = keyPair;
-  return cachedRootCA;
+  result.issuingGenerated = true;
+  result.issuingPrivateKeyBase64 = Buffer.from(issuingPrivateKeyPem, "utf8").toString("base64");
+  result.issuingCertBase64 = Buffer.from(issuingCert.toString("pem"), "utf8").toString("base64");
+
+  return result;
 }
 
-interface CertificatePayload {
-  subject: string;
-  name: string;
-  role: string;
-  publicKey: string;
-  issuer: string;
-  issuedAt: string;
-  expiresAt: string;
+interface LoadedIssuingCA {
+  issuingPrivateKey: CryptoKey;
+  issuingCert: x509.X509Certificate;
+  rootCert: x509.X509Certificate;
 }
 
-function buildCertificatePayload(
-  user: { id: string; name: string; role: string; publicKey: string },
-  issuedAt: string,
-  expiresAt: string,
-): CertificatePayload {
+let cachedIssuingCA: LoadedIssuingCA | null = null;
+
+/**
+ * Loads what the RUNNING SERVER needs to sign and verify certificates day
+ * to day: the Issuing CA's private key and certificate, plus the root
+ * CERTIFICATE (public — needed to verify the issuing cert's own chain
+ * link, never to sign anything). The root PRIVATE key is never read here;
+ * if it's genuinely missing, that's scripts/first-run.ts's problem to
+ * have caught, not something this function falls back to generating.
+ */
+export async function ensureIssuingCA(): Promise<LoadedIssuingCA> {
+  if (cachedIssuingCA) return cachedIssuingCA;
+
+  const envIssuingKey = process.env.ISSUING_CA_PRIVATE_KEY_BASE64;
+  const envIssuingCert = process.env.ISSUING_CA_CERT_BASE64;
+  const envRootCert = process.env.ROOT_CA_CERT_BASE64;
+
+  let issuingPrivateKeyPem: string;
+  let issuingCertPem: string;
+  let rootCertPem: string;
+
+  if (envIssuingKey && envIssuingCert && envRootCert) {
+    issuingPrivateKeyPem = decodeBase64Pem(envIssuingKey);
+    issuingCertPem = decodeBase64Pem(envIssuingCert);
+    rootCertPem = decodeBase64Pem(envRootCert);
+  } else if (
+    fs.existsSync(ISSUING_PRIVATE_KEY_PATH) &&
+    fs.existsSync(ISSUING_CERT_PATH) &&
+    fs.existsSync(ROOT_CERT_PATH)
+  ) {
+    issuingPrivateKeyPem = fs.readFileSync(ISSUING_PRIVATE_KEY_PATH, "utf8");
+    issuingCertPem = fs.readFileSync(ISSUING_CERT_PATH, "utf8");
+    rootCertPem = fs.readFileSync(ROOT_CERT_PATH, "utf8");
+  } else {
+    throw new Error(
+      "Issuing CA not found (no env vars, no keys/issuing-ca-*.pem + keys/root-ca-cert.pem on disk) — " +
+        "run `npm run first-run` first.",
+    );
+  }
+
+  cachedIssuingCA = {
+    issuingPrivateKey: await importPrivateKeyPem(issuingPrivateKeyPem),
+    issuingCert: new x509.X509Certificate(issuingCertPem),
+    rootCert: new x509.X509Certificate(rootCertPem),
+  };
+  return cachedIssuingCA;
+}
+
+// ---------------------------------------------------------------------------
+// 4. CA PUBLIC IDENTITY (client-side verification bootstrap)
+// ---------------------------------------------------------------------------
+
+export interface CAPublicCertificates {
+  rootCertPem: string;
+  issuingCertPem: string;
+  // SHA-256 of the ROOT certificate's DER — the actual trust anchor an
+  // operator would publish out-of-band for pinning. Same convention as a
+  // leaf certificate's own fingerprint.
+  fingerprint: string;
+}
+
+export async function getCAPublicCertificates(): Promise<CAPublicCertificates> {
+  const { rootCert, issuingCert } = await ensureIssuingCA();
+  const digest = await webcrypto.subtle.digest("SHA-256", rootCert.rawData);
   return {
-    subject: user.id,
-    name: user.name,
-    role: user.role,
-    publicKey: user.publicKey,
-    issuer: CA_ISSUER_NAME,
-    issuedAt,
-    expiresAt,
+    rootCertPem: rootCert.toString("pem"),
+    issuingCertPem: issuingCert.toString("pem"),
+    fingerprint: Buffer.from(digest).toString("hex"),
   };
 }
 
 // ---------------------------------------------------------------------------
-// 2. CERTIFICATE ISSUANCE
+// 5. CERTIFICATE ISSUANCE
 // ---------------------------------------------------------------------------
 
 export interface IssueCertificateInput {
   id: string;
   name: string;
   role: Role;
-  publicKey: string;
+  publicKey: string; // SPKI PEM, generated client-side exactly as before
 }
 
 export interface IssuedCertificate {
   id: string;
-  subject: string;
-  name: string;
-  role: string;
-  publicKey: string;
+  serialNumber: string;
+  certificatePem: string;
+  fingerprint: string;
   issuer: string;
   issuedAt: string;
   expiresAt: string;
-  signature: string;
-  fingerprint: string;
-  payloadHash: string;
 }
 
+function pemToDerBuffer(pem: string): ArrayBuffer {
+  const base64 = pem.replace(/-----BEGIN [^-]+-----/, "").replace(/-----END [^-]+-----/, "").replace(/\s+/g, "");
+  const buf = Buffer.from(base64, "base64");
+  // See the identical comment in lib/x509Keys.ts's pemToDer(): a small
+  // Buffer.from(string, "base64") is a view into a shared pool, so
+  // buf.buffer alone is the wrong (and wrong-sized) ArrayBuffer unless this
+  // happens to be the first small Buffer decoded in the process. Slice to
+  // this buffer's own range.
+  return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+}
+
+const API_PUBLIC_URL = process.env.API_PUBLIC_URL ?? "http://localhost:4000";
+
 /**
- * Issues a signed certificate binding `user.publicKey` to their identity.
- *
- * Steps:
- *  a) Build the certificate payload (what we are vouching for).
- *  b) Canonicalize it and take its SHA-256 digest — this digest is the
- *     fixed-size "fingerprint of the claim" that RSA signing actually
- *     operates on. We compute it explicitly here for transparency/logging;
- *     `crypto.sign("RSA-SHA256", ...)` performs this same SHA-256 hashing
- *     internally before applying the RSA private-key operation (PKCS#1 v1.5
- *     padding), so the two are the same digest.
- *  c) Sign the canonical payload with the CA's RSA private key using
- *     RSA-SHA256. Only someone holding the CA private key could have
- *     produced this signature; anyone with the CA public key can check it.
- *  d) Compute the fingerprint: SHA-256 of the user's public key alone (not
- *     the whole payload). This is a stable, short identifier for "this
- *     exact public key" independent of who it belongs to or when it was
- *     issued — the same convention browsers use for TLS cert fingerprints.
- *  e) Persist the Certificate row via Prisma.
- *  f) Return the full certificate object (including the raw payload hash,
- *     which is not stored in the DB but useful for debugging/viva).
+ * Issues a leaf X.509 certificate for `user`, signed by the Issuing CA:
+ * CA:false, KeyUsage digitalSignature, subject CN=<name>,OU=<role>, a CRL
+ * Distribution Point pointing at this server's signed-CRL endpoint, and a
+ * random 128-bit serial. Persists the full certificatePem — nothing about
+ * the certificate's own signature/public key is stored as a separate
+ * column, so there is nothing that can drift from what was actually signed.
  */
-export async function issueCertificate(
-  user: IssueCertificateInput,
-): Promise<IssuedCertificate> {
-  const { privateKey } = ensureRootCA();
+export async function issueCertificate(user: IssueCertificateInput): Promise<IssuedCertificate> {
+  const { issuingPrivateKey, issuingCert } = await ensureIssuingCA();
 
   const issuedAtDate = new Date();
-  const expiresAtDate = new Date(issuedAtDate);
-  expiresAtDate.setUTCDate(expiresAtDate.getUTCDate() + CERT_VALIDITY_DAYS);
+  const expiresAtDate = addDays(issuedAtDate, CERT_VALIDITY_DAYS);
+  const serialNumber = generateSerialNumber();
 
-  const issuedAt = issuedAtDate.toISOString();
-  const expiresAt = expiresAtDate.toISOString();
-  const payload = buildCertificatePayload(user, issuedAt, expiresAt);
-  const canonicalPayload = canonicalStringify(payload);
-  const payloadBuffer = Buffer.from(canonicalPayload, "utf8");
+  const cert = await x509.X509CertificateGenerator.create({
+    serialNumber,
+    subject: `CN=${user.name},OU=${user.role}`,
+    issuer: issuingCert.subject,
+    notBefore: issuedAtDate,
+    notAfter: expiresAtDate,
+    signingAlgorithm: RSA_SIGNING_ALGORITHM,
+    publicKey: pemToDerBuffer(user.publicKey),
+    signingKey: issuingPrivateKey,
+    extensions: [
+      new x509.BasicConstraintsExtension(false),
+      new x509.KeyUsagesExtension(x509.KeyUsageFlags.digitalSignature),
+      new x509.CRLDistributionPointsExtension([`${API_PUBLIC_URL}/api/certificates/crl/signed`]),
+    ],
+  });
 
-  // (b) Explicit SHA-256 digest of the canonical payload.
-  const payloadHash = crypto
-    .createHash("sha256")
-    .update(payloadBuffer)
-    .digest("hex");
+  const fingerprint = Buffer.from(
+    await webcrypto.subtle.digest("SHA-256", cert.rawData),
+  ).toString("hex");
+  const certificatePem = cert.toString("pem");
 
-  // (c) RSA-SHA256 signature over the canonical payload, using the CA's
-  // private key. Stored as base64 text since Signature/Certificate columns
-  // are TEXT, not BYTEA.
-  const signature = crypto
-    .sign("RSA-SHA256", payloadBuffer, privateKey)
-    .toString("base64");
-
-  // (d) Fingerprint = SHA-256 of the public key PEM alone.
-  const fingerprint = crypto
-    .createHash("sha256")
-    .update(user.publicKey, "utf8")
-    .digest("hex");
-
-  // (e) Persist.
   const record = await prisma.certificate.create({
     data: {
       subjectUserId: user.id,
       role: user.role,
-      publicKey: user.publicKey,
-      issuer: CA_ISSUER_NAME,
+      serialNumber,
+      certificatePem,
+      fingerprint,
       issuedAt: issuedAtDate,
       expiresAt: expiresAtDate,
-      signature,
-      fingerprint,
     },
   });
 
@@ -258,29 +394,22 @@ export async function issueCertificate(
     actorUserId: user.id,
     entityType: "CERTIFICATE",
     entityId: record.id,
-    details: { subjectUserId: user.id, role: user.role, fingerprint },
+    details: { subjectUserId: user.id, role: user.role, serialNumber, fingerprint },
   });
 
-  // (f) Return the full certificate, including the payload hash for
-  // reference (not persisted as its own column — recomputed on demand by
-  // verifyCertificate()).
   return {
     id: record.id,
-    subject: user.id,
-    name: user.name,
-    role: user.role,
-    publicKey: user.publicKey,
-    issuer: CA_ISSUER_NAME,
-    issuedAt,
-    expiresAt,
-    signature,
+    serialNumber,
+    certificatePem,
     fingerprint,
-    payloadHash,
+    issuer: issuingCert.subject,
+    issuedAt: issuedAtDate.toISOString(),
+    expiresAt: expiresAtDate.toISOString(),
   };
 }
 
 // ---------------------------------------------------------------------------
-// 3. CERTIFICATE VERIFICATION
+// 6. CERTIFICATE VERIFICATION (full chain: user -> issuing -> root)
 // ---------------------------------------------------------------------------
 
 export interface VerifyCertificateResult {
@@ -290,126 +419,75 @@ export interface VerifyCertificateResult {
     subject: string;
     name: string;
     role: string;
+    serialNumber: string;
     issuer: string;
     issuedAt: string;
     expiresAt: string;
     fingerprint: string;
-    fingerprintMatches: boolean;
-    payloadHash: string;
-    signatureValid: boolean;
+    // Each link verified independently, never short-circuited, so a
+    // caller (or a report) can tell exactly which link in the chain broke.
+    userSignatureValid: boolean; // user cert signed by the issuing CA
+    issuingSignatureValid: boolean; // issuing cert signed by the root CA
+    withinValidityWindow: boolean;
+    keyUsageValid: boolean; // digitalSignature bit present
     expired: boolean;
     revoked: boolean;
     revokedReason: string | null;
-    // Set only when `valid` is false — the single concrete reason a
-    // verify-path caller should surface to the user/report, rather than
-    // making them infer it from the boolean flags above.
     reason: string | null;
   };
 }
 
-/**
- * Looks up a user's certificate by their user id and verifies it live.
- * Returns null if the user has no certificate at all (should only happen
- * for a user row created outside the normal registration flow).
- *
- * This is the one entry point every signing/approval verify path should
- * use to answer "is this actor's certificate currently trustworthy?" —
- * centralizing the lookup+verify pair so every call site checks expiry and
- * revocation the same way lib/ca.ts itself does, rather than re-deriving
- * that logic (or forgetting a piece of it) at each call site.
- */
-export async function verifyCertificateForUser(
-  userId: string,
-): Promise<VerifyCertificateResult | null> {
-  const certificate = await prisma.certificate.findUnique({
-    where: { subjectUserId: userId },
-  });
+export async function verifyCertificateForUser(userId: string): Promise<VerifyCertificateResult | null> {
+  const certificate = await prisma.certificate.findUnique({ where: { subjectUserId: userId } });
   if (!certificate) return null;
   return verifyCertificate(certificate.id);
 }
 
-/**
- * Verifies a previously issued certificate.
- *
- * Steps:
- *  a) Load the certificate (and its subject User, for `name`) from the DB.
- *  b) Rebuild the exact canonical payload that was signed at issuance time
- *     — same field set, same key order, same ISO timestamp string.
- *  c) Use crypto.verify with the CA's public key to check the stored
- *     signature against that rebuilt payload. This is the core trust
- *     check: it succeeds only if (1) the payload has not changed since
- *     issuance and (2) the signature was produced by the CA's private key.
- *  d) Also recompute the public-key fingerprint as a sanity check that the
- *     stored publicKey/fingerprint pair is internally consistent.
- */
-export async function verifyCertificate(
-  certificateId: string,
-): Promise<VerifyCertificateResult> {
-  const { publicKey: caPublicKey } = ensureRootCA();
+export async function verifyCertificate(certificateId: string): Promise<VerifyCertificateResult> {
+  const { issuingCert, rootCert } = await ensureIssuingCA();
 
-  // (a) Fetch certificate + subject. select, not include: true — only the
-  // subject's name is ever used below; the full User row carries
-  // passwordHash and wrapped key material, neither of which this function
-  // (or its callers, some of which return its result to clients) should
-  // ever pull into memory.
   const cert = await prisma.certificate.findUnique({
     where: { id: certificateId },
     include: { subject: { select: { name: true } } },
   });
-
   if (!cert) {
     throw new Error(`Certificate not found: ${certificateId}`);
   }
 
-  // (b) Rebuild the canonical payload exactly as issueCertificate() built it.
-  const payload = buildCertificatePayload(
-    {
-      id: cert.subjectUserId,
-      name: cert.subject.name,
-      role: cert.role,
-      publicKey: cert.publicKey,
-    },
-    cert.issuedAt.toISOString(),
-    cert.expiresAt.toISOString(),
-  );
-  const canonicalPayload = canonicalStringify(payload);
-  const payloadBuffer = Buffer.from(canonicalPayload, "utf8");
+  const parsed = new x509.X509Certificate(cert.certificatePem);
 
-  const payloadHash = crypto
-    .createHash("sha256")
-    .update(payloadBuffer)
-    .digest("hex");
+  // signatureOnly: true is required — @peculiar/x509's X509Certificate
+  // .verify() otherwise ALSO folds the certificate's own notBefore/
+  // notAfter window into its result by default, silently returning false
+  // for a genuinely, correctly signed but merely-expired certificate. That
+  // would make a signature check indistinguishable from an actual forgery
+  // and corrupt `reason` below ("forged or tampered" would be reported for
+  // a cert that's simply expired) — `expired`/`withinValidityWindow` below
+  // already cover the time window independently, which is the whole point
+  // of reporting these as separate fields.
+  const userSignatureValid = await parsed.verify({ publicKey: issuingCert.publicKey, signatureOnly: true });
+  const issuingSignatureValid = await issuingCert.verify({ publicKey: rootCert.publicKey, signatureOnly: true });
 
-  // (c) Verify the RSA-SHA256 signature against the CA's public key.
-  const signatureValid = crypto.verify(
-    "RSA-SHA256",
-    payloadBuffer,
-    caPublicKey,
-    Buffer.from(cert.signature, "base64"),
-  );
-
-  // (d) Recompute the fingerprint from the stored public key and compare.
-  const recomputedFingerprint = crypto
-    .createHash("sha256")
-    .update(cert.publicKey, "utf8")
-    .digest("hex");
-  const fingerprintMatches = recomputedFingerprint === cert.fingerprint;
-
-  // (e) Validity window + revocation — checked independently of the
-  // signature itself: a certificate can be cryptographically genuine and
-  // still untrusted because it expired or was revoked after issuance.
   const now = new Date();
-  const expired = now > cert.expiresAt;
+  const withinValidityWindow = now >= parsed.notBefore && now <= parsed.notAfter;
+  const expired = now > parsed.notAfter;
+
+  const keyUsage = parsed.getExtension(x509.KeyUsagesExtension);
+  const keyUsageValid = Boolean(keyUsage && keyUsage.usages & x509.KeyUsageFlags.digitalSignature);
+
   const revoked = cert.revoked;
 
-  const valid = signatureValid && fingerprintMatches && !expired && !revoked;
+  const valid =
+    userSignatureValid && issuingSignatureValid && withinValidityWindow && keyUsageValid && !revoked;
 
   let reason: string | null = null;
   if (!valid) {
-    if (!signatureValid) reason = "Certificate signature does not match the CA's public key (forged or tampered).";
-    else if (!fingerprintMatches) reason = "Stored fingerprint does not match the certificate's public key.";
+    if (!userSignatureValid) reason = "Certificate signature does not match the Issuing CA's public key (forged or tampered).";
+    else if (!issuingSignatureValid) reason = "The Issuing CA's own certificate does not verify against the Root CA — chain is broken.";
     else if (revoked) reason = `Certificate was revoked${cert.revokedReason ? `: ${cert.revokedReason}` : "."}`;
-    else if (expired) reason = `Certificate expired on ${cert.expiresAt.toISOString()}.`;
+    else if (expired) reason = `Certificate expired on ${parsed.notAfter.toISOString()}.`;
+    else if (!withinValidityWindow) reason = `Certificate is not yet valid (notBefore ${parsed.notBefore.toISOString()}).`;
+    else if (!keyUsageValid) reason = "Certificate does not carry the digitalSignature key usage.";
   }
 
   return {
@@ -419,13 +497,15 @@ export async function verifyCertificate(
       subject: cert.subjectUserId,
       name: cert.subject.name,
       role: cert.role,
-      issuer: cert.issuer,
+      serialNumber: cert.serialNumber,
+      issuer: parsed.issuer,
       issuedAt: cert.issuedAt.toISOString(),
       expiresAt: cert.expiresAt.toISOString(),
       fingerprint: cert.fingerprint,
-      fingerprintMatches,
-      payloadHash,
-      signatureValid,
+      userSignatureValid,
+      issuingSignatureValid,
+      withinValidityWindow,
+      keyUsageValid,
       expired,
       revoked,
       revokedReason: cert.revokedReason,
@@ -434,17 +514,19 @@ export async function verifyCertificate(
   };
 }
 
+/**
+ * Extracts the SPKI PEM public key from a stored certificate's PEM — the
+ * one place routes/transactions.ts should get an actor's public key from
+ * for a signature check, instead of trusting a separately-stored column
+ * that could in principle drift from what the certificate actually says.
+ */
+export function publicKeyPemFromCertificatePem(certificatePem: string): string {
+  return new x509.X509Certificate(certificatePem).publicKey.toString("pem");
+}
+
 // ---------------------------------------------------------------------------
-// 3b. CERTIFICATE REVOCATION (CRL)
+// 7. CERTIFICATE REVOCATION (CRL)
 // ---------------------------------------------------------------------------
-//
-// Revocation is the half of PKI trust that an expiry date alone can't cover:
-// a key compromised today must stop being trusted today, not up to a year
-// from now. Revoking never touches the certificate's signature or deletes
-// the row — it's a separate, additive fact ("the CA no longer vouches for
-// this") that every verify path (verifyCertificate above, and every
-// signature-chain check that calls it) must check independently of the
-// signature's own cryptographic validity.
 
 export interface RevokeCertificateInput {
   certificateId: string;
@@ -454,6 +536,7 @@ export interface RevokeCertificateInput {
 
 export interface RevokedCertificateSummary {
   certificateId: string;
+  serialNumber: string;
   subjectUserId: string;
   subjectName: string;
   role: string;
@@ -463,9 +546,7 @@ export interface RevokedCertificateSummary {
   revokedByUserId: string | null;
 }
 
-export async function revokeCertificate(
-  input: RevokeCertificateInput,
-): Promise<RevokedCertificateSummary> {
+export async function revokeCertificate(input: RevokeCertificateInput): Promise<RevokedCertificateSummary> {
   const cert = await prisma.certificate.findUnique({
     where: { id: input.certificateId },
     include: { subject: { select: { name: true } } },
@@ -480,13 +561,10 @@ export async function revokeCertificate(
   const revokedAt = new Date();
   const updated = await prisma.certificate.update({
     where: { id: input.certificateId },
-    data: {
-      revoked: true,
-      revokedAt,
-      revokedReason: input.reason,
-      revokedByUserId: input.revokedByUserId,
-    },
+    data: { revoked: true, revokedAt, revokedReason: input.reason, revokedByUserId: input.revokedByUserId },
   });
+
+  invalidateCrlCache();
 
   await appendAuditEntry({
     action: "CERTIFICATE_REVOKED",
@@ -508,110 +586,9 @@ export async function revokeCertificate(
   };
 }
 
-// ---------------------------------------------------------------------------
-// 3c. CA PUBLIC IDENTITY + SIGNED CRL (client-side certificate verification)
-// ---------------------------------------------------------------------------
-//
-// The two functions below exist so the BROWSER can independently verify a
-// certificate's authenticity and revocation status itself — see
-// frontend/src/lib/certificateVerify.ts — rather than trusting a verdict
-// computed only by this server. getCAPublicCertificate() publishes what the
-// browser needs to bootstrap that trust (the CA's own public key); getSignedCRL()
-// publishes a CA-signed, freshness-bounded revocation list the browser can
-// check a certificate's serial against without a live per-certificate query.
-
-export interface CAPublicCertificate {
-  issuer: string;
-  publicKey: string;
-  // SHA-256 of the CA public key PEM — same convention as a certificate's
-  // own fingerprint. Displayed on the Certificate Lookup page so a user
-  // has *something* concrete to compare against an out-of-band published
-  // value, which is the actual trust-bootstrap mechanism in a real
-  // deployment (see the comment on the /ca route for why fetching it from
-  // this same server doesn't by itself establish trust).
-  fingerprint: string;
-}
-
-export function getCAPublicCertificate(): CAPublicCertificate {
-  const { publicKey } = ensureRootCA();
-  const fingerprint = crypto.createHash("sha256").update(publicKey, "utf8").digest("hex");
-  return { issuer: CA_ISSUER_NAME, publicKey, fingerprint };
-}
-
-// The CRL is only ever valid for this long after it's issued — the
-// browser's own verify helper treats a CRL older than this as untrustworthy
-// (reported under its "CRL freshness" check) regardless of whether its
-// signature still verifies, since a stale-but-genuinely-signed CRL could be
-// replayed to hide a revocation that happened after it was issued.
-const CRL_VALIDITY_MS = 60 * 60 * 1000; // 1 hour
-
-export interface SignedCRL {
-  type: "CRL";
-  issuer: string;
-  thisUpdate: string;
-  nextUpdate: string;
-  revokedSerials: string[];
-  signature: string;
-}
-
-interface CRLPayload {
-  type: "CRL";
-  issuer: string;
-  thisUpdate: string;
-  nextUpdate: string;
-  revokedSerials: string[];
-}
-
 /**
- * A CA-signed, freshness-bounded Certificate Revocation List — distinct
- * from getCRL() below (which returns the same revoked set as a plain,
- * unsigned list for the Admin UI's CRL table and is left untouched).
- *
- * Domain separation: this payload carries an explicit `type: "CRL"` field
- * precisely so a CRL signature can never be confused with a certificate
- * signature. Certificates (buildCertificatePayload, above) do NOT get an
- * equivalent tag — adding one would change the exact bytes
- * verifyCertificate() reconstructs and checks the stored signature
- * against, which would invalidate every certificate already issued before
- * this change (their signature was computed over the untagged shape and
- * can never be made to match a differently-shaped rebuild). In practice
- * this is not a live confusion risk even without the tag: a certificate
- * payload's key set ({subject,name,role,publicKey,issuer,issuedAt,
- * expiresAt}) and this CRL payload's key set ({type,issuer,thisUpdate,
- * nextUpdate,revokedSerials}) are completely disjoint, so
- * canonicalStringify() can never produce identical bytes for one as for
- * the other regardless of field values — the `type` tag here is
- * defense-in-depth for this payload and any future one, not a fix for an
- * exploitable gap in the certificate payload today.
- */
-export function getSignedCRL(): Promise<SignedCRL> {
-  return getCRL().then((revoked) => {
-    const { privateKey } = ensureRootCA();
-    const thisUpdate = new Date();
-    const nextUpdate = new Date(thisUpdate.getTime() + CRL_VALIDITY_MS);
-
-    const payload: CRLPayload = {
-      type: "CRL",
-      issuer: CA_ISSUER_NAME,
-      thisUpdate: thisUpdate.toISOString(),
-      nextUpdate: nextUpdate.toISOString(),
-      revokedSerials: revoked.map((r) => r.certificateId),
-    };
-    const canonicalPayload = canonicalStringify(payload);
-    const signature = crypto
-      .sign("RSA-SHA256", Buffer.from(canonicalPayload, "utf8"), privateKey)
-      .toString("base64");
-
-    return { ...payload, signature };
-  });
-}
-
-/**
- * The Certificate Revocation List: every certificate the CA has revoked,
- * most recent first. Any stakeholder can fetch this to check a signer's
- * standing independently of a specific transaction — the standard PKI
- * pattern of publishing revocations rather than requiring a live per-cert
- * query against the CA for every check.
+ * The plain, unsigned revoked-certificate list — feeds the Admin UI's CRL
+ * table only. Left exactly as it behaved before this rework.
  */
 export async function getCRL(): Promise<RevokedCertificateSummary[]> {
   const revoked = await prisma.certificate.findMany({
@@ -622,6 +599,7 @@ export async function getCRL(): Promise<RevokedCertificateSummary[]> {
 
   return revoked.map((cert) => ({
     certificateId: cert.id,
+    serialNumber: cert.serialNumber,
     subjectUserId: cert.subjectUserId,
     subjectName: cert.subject.name,
     role: cert.role,
@@ -632,28 +610,97 @@ export async function getCRL(): Promise<RevokedCertificateSummary[]> {
   }));
 }
 
-// ---------------------------------------------------------------------------
-// 4. ADMIN BOOTSTRAP KEY PAIR GENERATION
-// ---------------------------------------------------------------------------
+const CRL_VALIDITY_MS = 60 * 60 * 1000; // 1 hour — the CRL's own thisUpdate/nextUpdate window
+const CRL_CACHE_MS = 3 * 60 * 1000; // regenerate at most every 3 minutes
+
+export interface SignedCRL {
+  pem: string;
+  thisUpdate: string;
+  nextUpdate: string;
+}
+
+let cachedCrl: { crl: SignedCRL; generatedAt: number } | null = null;
+
+function invalidateCrlCache(): void {
+  cachedCrl = null;
+}
 
 /**
- * Generates a fresh RSA-2048 key pair. ONLY used by scripts/create-first-admin.ts
- * (and scripts/test-ca.ts for demonstration) — every normal user
- * (Landowner / Village Officer / Registrar) generates their own key pair
- * in the browser instead (frontend/src/lib/clientCrypto.ts) and never
- * sends the private key to the server at all; see
- * verifyRegistrationProof() below. An ADMIN account never signs anything,
- * so its private key is generated once for certificate issuance and then
- * discarded — nothing wraps or stores it, since there's nothing to use it
- * for afterwards.
+ * A real, CA-signed X.509 CRL (X509CrlGenerator) listing every revoked
+ * certificate's serial, thisUpdate=now, nextUpdate=+1h. Regenerating and
+ * re-signing a CRL is cheap but not free, and this endpoint is hit by
+ * every client-side verification — so the generated CRL is cached in
+ * memory for a few minutes (CRL_CACHE_MS) independent of its own
+ * thisUpdate/nextUpdate window (which governs how long a CLIENT should
+ * trust a cached copy, a different and longer concern). revokeCertificate()
+ * explicitly invalidates this cache, so a fresh revocation is never
+ * masked by a stale in-memory CRL for the full 3 minutes.
  */
-export function generateUserKeyPair(): KeyPairPem {
-  return generateRsaKeyPair();
+export async function getSignedCRL(): Promise<SignedCRL> {
+  if (cachedCrl && Date.now() - cachedCrl.generatedAt < CRL_CACHE_MS) {
+    return cachedCrl.crl;
+  }
+
+  const { issuingPrivateKey, issuingCert } = await ensureIssuingCA();
+  const revoked = await getCRL();
+
+  const thisUpdate = new Date();
+  const nextUpdate = new Date(thisUpdate.getTime() + CRL_VALIDITY_MS);
+
+  const crl = await x509.X509CrlGenerator.create({
+    issuer: issuingCert.subject,
+    thisUpdate,
+    nextUpdate,
+    signingAlgorithm: RSA_SIGNING_ALGORITHM,
+    signingKey: issuingPrivateKey,
+    entries: revoked.map((r) => ({
+      serialNumber: r.serialNumber,
+      revocationDate: new Date(r.revokedAt),
+      reason: x509.X509CrlReason.unspecified,
+    })),
+  });
+
+  const signed: SignedCRL = {
+    pem: crl.toString("pem"),
+    thisUpdate: thisUpdate.toISOString(),
+    nextUpdate: nextUpdate.toISOString(),
+  };
+  cachedCrl = { crl: signed, generatedAt: Date.now() };
+  return signed;
 }
 
 // ---------------------------------------------------------------------------
-// 5. REGISTRATION PROOF OF POSSESSION (client-side keys)
+// 8. ADMIN BOOTSTRAP KEY PAIR GENERATION
 // ---------------------------------------------------------------------------
+
+/**
+ * Generates a fresh RSA-2048 key pair (Node's own crypto, PEM-encoded —
+ * this is a one-off throwaway key for the ADMIN bootstrap account, whose
+ * private key is discarded immediately, never wrapped or stored; it has
+ * nothing to do with @peculiar/x509 or the CA's own keys). ONLY used by
+ * scripts/create-first-admin.ts (and scripts/test-ca.ts for
+ * demonstration) — every normal user generates their own key pair in the
+ * browser instead (frontend/src/lib/clientCrypto.ts).
+ */
+export function generateUserKeyPair(): { publicKey: string; privateKey: string } {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+  return { publicKey, privateKey };
+}
+
+// ---------------------------------------------------------------------------
+// 9. REGISTRATION PROOF OF POSSESSION (client-side keys)
+// ---------------------------------------------------------------------------
+//
+// Unchanged by the X.509 rework — this has nothing to do with the
+// certificate's own container format. It proves the browser that
+// submitted `publicKey` at registration also holds the matching private
+// key, BEFORE any certificate exists for it to be embedded in. See the
+// original (pre-rework) comment here for the full rationale; preserved
+// verbatim below.
 //
 // issueCertificate() trusts whatever public key it is handed. Without this
 // check, nothing stops a registration request from submitting a public key
@@ -691,9 +738,7 @@ export interface RegistrationProofResult {
   reason: string | null;
 }
 
-export function verifyRegistrationProof(
-  input: RegistrationProofInput,
-): RegistrationProofResult {
+export function verifyRegistrationProof(input: RegistrationProofInput): RegistrationProofResult {
   const timestampMs = Date.parse(input.timestamp);
   if (Number.isNaN(timestampMs)) {
     return { valid: false, reason: "timestamp is not a valid ISO 8601 date" };
@@ -710,11 +755,7 @@ export function verifyRegistrationProof(
     return { valid: false, reason: "publicKey is not a valid PEM key" };
   }
 
-  const canonical = canonicalStringify({
-    email: input.email,
-    fingerprint,
-    timestamp: input.timestamp,
-  });
+  const canonical = canonicalStringify({ email: input.email, fingerprint, timestamp: input.timestamp });
   const canonicalBuffer = Buffer.from(canonical, "utf8");
 
   try {

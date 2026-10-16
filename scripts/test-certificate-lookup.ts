@@ -113,11 +113,12 @@ async function main() {
   );
 
   // 3. Exact lookup by serial — any authenticated user (landowner included).
-  //    First resolve the landowner's own certificate id via the (untouched)
-  //    legacy by-user-id endpoint, exactly as AdminDashboard already does.
+  //    First resolve the landowner's own certificate's real X.509 serial via
+  //    the (untouched) legacy by-user-id endpoint, exactly as
+  //    AdminDashboard already does.
   const legacyLookup = await api(`/certificates/${landowner.id}`, landowner.token);
   check("legacy /:userId lookup still works unchanged", legacyLookup.status === 200);
-  const serial = legacyLookup.data?.id as string;
+  const serial = legacyLookup.data?.serialNumber as string;
 
   const serialLookup = await api(`/certificates/serial/${serial}`, landowner.token);
   check("landowner CAN look up an exact serial (200)", serialLookup.status === 200);
@@ -130,8 +131,11 @@ async function main() {
     })(),
   );
   check(
-    "serial lookup response has no server-computed verdict fields",
+    "serial lookup response carries the raw certificate PEMs, not a server-computed verdict",
     serialLookup.data &&
+      typeof serialLookup.data.certificatePem === "string" &&
+      typeof serialLookup.data.issuingCertificatePem === "string" &&
+      serialLookup.data.serialNumber === serial &&
       !("valid" in serialLookup.data) &&
       !("reason" in serialLookup.data) &&
       !("revoked" in serialLookup.data),
@@ -147,24 +151,26 @@ async function main() {
     cacheControl.includes("immutable") && cacheControl.includes("private"),
   );
 
-  // 4. CA public key + fingerprint endpoint.
+  // 4. CA public certificates + fingerprint endpoint.
   const caInfo = await api("/certificates/ca", landowner.token);
   check(
-    "GET /certificates/ca returns issuer/publicKey/fingerprint",
+    "GET /certificates/ca returns rootCertPem/issuingCertPem/fingerprint",
     caInfo.status === 200 &&
-      typeof caInfo.data?.publicKey === "string" &&
+      typeof caInfo.data?.rootCertPem === "string" &&
+      typeof caInfo.data?.issuingCertPem === "string" &&
       typeof caInfo.data?.fingerprint === "string",
   );
 
-  // 5. Signed CRL endpoint.
+  // 5. Signed CRL endpoint — a real X.509 CRL PEM, not a canonicalStringify
+  // JSON payload.
   const signedCrl = await api("/certificates/crl/signed", landowner.token);
   check(
-    "GET /certificates/crl/signed returns a type:CRL payload with thisUpdate/nextUpdate",
+    "GET /certificates/crl/signed returns a real CRL PEM with thisUpdate/nextUpdate",
     signedCrl.status === 200 &&
-      signedCrl.data?.type === "CRL" &&
+      typeof signedCrl.data?.pem === "string" &&
+      signedCrl.data.pem.includes("BEGIN CRL") &&
       typeof signedCrl.data?.thisUpdate === "string" &&
-      typeof signedCrl.data?.nextUpdate === "string" &&
-      Array.isArray(signedCrl.data?.revokedSerials),
+      typeof signedCrl.data?.nextUpdate === "string",
   );
 
   // 6. /api/users min-length enumeration fix.

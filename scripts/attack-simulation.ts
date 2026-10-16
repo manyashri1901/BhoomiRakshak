@@ -28,6 +28,26 @@ import {
 import { canonicalStringify } from "../frontend/src/lib/canonicalize.ts";
 import { prisma } from "../lib/prisma.ts";
 import { computeEntryHash } from "../lib/audit.ts";
+import { ensureIssuingCA } from "../lib/ca.ts";
+import * as x509 from "@peculiar/x509";
+import { webcrypto } from "node:crypto";
+import { RSA_SIGNING_ALGORITHM } from "../lib/x509Keys.ts";
+
+// This script creates real users, tampers rows directly in the database
+// (a revoked/expired certificate, a backdated audit row, etc.) — never
+// point it at a database you care about. TEST_DATABASE_URL must be set
+// AND must equal the DATABASE_URL this process actually connects with,
+// as an explicit, deliberate confirmation that the configured database is
+// disposable — not just "whatever DATABASE_URL happens to be right now."
+if (!process.env.TEST_DATABASE_URL || process.env.TEST_DATABASE_URL !== process.env.DATABASE_URL) {
+  console.error(
+    "Refusing to run: TEST_DATABASE_URL is not set, or does not match DATABASE_URL.\n" +
+      "This script tampers with data directly (revokes certificates, corrupts audit rows, etc.) " +
+      "and must only ever run against a disposable test database.\n" +
+      "Set TEST_DATABASE_URL to the exact same value as DATABASE_URL to confirm that's what you intend.",
+  );
+  process.exit(1);
+}
 
 const BASE = "http://localhost:4000/api";
 const PASSWORD = "attacktest123";
@@ -305,29 +325,46 @@ async function main() {
   }
 
   // =========================================================================
-  // 5. Expired certificate (correctly signed by the CA, but past expiresAt)
+  // 5. Expired certificate (correctly signed by the Issuing CA, but past
+  //    notAfter) — a genuine X.509 certificate minted with a backdated
+  //    validity window, not a tampered one, to prove expiry is checked
+  //    independently of signature validity.
   // =========================================================================
   {
     const victim = await registerUser("Attack Expiry Victim", `atk-expiry-${stamp}@example.com`, "LANDOWNER");
     const cert = await prisma.certificate.findUnique({ where: { subjectUserId: victim.id } });
-    const caPrivateKey = (await import("node:fs")).readFileSync(
-      (await import("node:path")).join(process.cwd(), "keys", "ca-private.pem"),
-      "utf8",
-    );
-    const issuedAt = new Date(Date.now() - 2 * 365 * 24 * 60 * 60 * 1000);
-    const expiresAt = new Date(issuedAt.getTime() + 365 * 24 * 60 * 60 * 1000);
-    const payload = {
-      subject: victim.id,
-      name: "Attack Expiry Victim",
-      role: "LANDOWNER",
-      publicKey: cert!.publicKey,
-      issuer: cert!.issuer,
-      issuedAt: issuedAt.toISOString(),
-      expiresAt: expiresAt.toISOString(),
-    };
-    const canonical = canonicalStringify(payload);
-    const signature = crypto.sign("RSA-SHA256", Buffer.from(canonical, "utf8"), caPrivateKey).toString("base64");
-    await prisma.certificate.update({ where: { id: cert!.id }, data: { issuedAt, expiresAt, signature } });
+    const { issuingPrivateKey, issuingCert } = await ensureIssuingCA();
+    const existingCert = new x509.X509Certificate(cert!.certificatePem);
+
+    const notBefore = new Date(Date.now() - 2 * 365 * 24 * 60 * 60 * 1000);
+    const notAfter = new Date(notBefore.getTime() + 365 * 24 * 60 * 60 * 1000);
+    const serialNumber = crypto.randomBytes(16);
+    serialNumber[0] &= 0x7f;
+    const backdatedCert = await x509.X509CertificateGenerator.create({
+      serialNumber: serialNumber.toString("hex"),
+      subject: existingCert.subject,
+      issuer: issuingCert.subject,
+      notBefore,
+      notAfter,
+      signingAlgorithm: RSA_SIGNING_ALGORITHM,
+      publicKey: existingCert.publicKey,
+      signingKey: issuingPrivateKey,
+      extensions: [
+        new x509.BasicConstraintsExtension(false),
+        new x509.KeyUsagesExtension(x509.KeyUsageFlags.digitalSignature),
+      ],
+    });
+    const fingerprint = Buffer.from(await webcrypto.subtle.digest("SHA-256", backdatedCert.rawData)).toString("hex");
+    await prisma.certificate.update({
+      where: { id: cert!.id },
+      data: {
+        certificatePem: backdatedCert.toString("pem"),
+        serialNumber: serialNumber.toString("hex"),
+        issuedAt: notBefore,
+        expiresAt: notAfter,
+        fingerprint,
+      },
+    });
 
     const lrId = await createApprovedLandRecord(registrar.token, victim.id, `SN-ATK-EXPIRED-${stamp}`);
     const upload = await uploadPdf(victim.token, `%PDF-1.4\nexpired ${stamp}`);
