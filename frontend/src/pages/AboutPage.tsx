@@ -7,7 +7,8 @@ const APPROACH = [
   {
     icon: UserCheck,
     title: "Digital identities",
-    description: "Every participant holds their own verified digital identity, not just a database row.",
+    description:
+      "Every participant holds a verified digital identity issued through a certificate authority hierarchy, not just a database row.",
   },
   {
     icon: Fingerprint,
@@ -27,8 +28,7 @@ const APPROACH = [
 ];
 
 const SCOPE_LIMITS = [
-  "Custom, simplified certificate format — not X.509.",
-  "A single root certificate authority operated by this system, not a licensed CA.",
+  "The certificate authority is operated by this project and is not a licensed Certifying Authority.",
   "No integration with government land record databases.",
   "No trusted timestamping.",
   "Intended to complement, not replace, existing registration systems.",
@@ -54,11 +54,12 @@ export function AboutPage() {
           <span className={SECTION_LABEL}>The problem</span>
           <h2 className={H2}>Digitised records still leave gaps</h2>
           <p className="mt-4 max-w-2xl text-base text-slate-600">
-            Moving land records online improves access, but it doesn't by itself prove who
-            authorised a change or whether a record was altered after the fact. A scanned document
-            can be edited without leaving a reliable trace. A land record can be sold to more than
-            one buyer through disconnected workflows that never cross-check each other. A name
-            typed into a database is not proof that the named person actually approved anything.
+            Paper-based and loosely digitised land records can be altered after the fact without
+            leaving a reliable trace, making forged documents hard to catch. The same property can
+            still be sold to more than one buyer when different offices process transactions
+            without cross-checking each other. And confirming who actually authorised a change
+            often still depends on manual verification across multiple offices rather than on
+            verifiable proof.
           </p>
         </Reveal>
       </section>
