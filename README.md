@@ -121,6 +121,39 @@ writers can never fork the chain. `verifyAuditChain()` recomputes and
 checks the whole chain on demand, reporting the first broken sequence
 number rather than trusting a cached flag.
 
+**RFC 3161 trusted timestamping** (`lib/timestamp.ts`) — periodically
+anchors the audit chain's head hash with a public Time-Stamp Authority
+(default: DigiCert's, `TSA_URL`), built entirely with `pkijs`/`asn1js` (no
+hand-rolled ASN.1). The messageImprint submitted is SHA-256 of the head
+hash's own bytes, with `certReq=true` and a random nonce; the returned
+token (a real CMS `SignedData`/`TSTInfo`) is stored as `AuditAnchor` rows —
+a side table, never written into the `AuditLog` chain itself or its
+advisory lock. Anchoring happens automatically, best-effort and
+non-blocking, after a transaction's final Registrar approval or rejection
+(`anchorAuditChainBestEffort()` in `routes/transactions.ts`; a TSA failure
+only ever logs a short warning, never affects the request), or manually via
+`POST /api/audit/anchor` (ADMIN-only) — both paths share one
+`TSA_MIN_INTERVAL_SECONDS` throttle so neither one hammers the TSA.
+`verifyAnchor()` checks, independently and never short-circuited: the token
+parses; its messageImprint matches this anchor's own stored head hash; the
+CMS signature verifies; the TSA certificate carries the `timeStamping` EKU
+and its chain validates to a trusted root (Node's `tls.rootCertificates`,
+plus `TSA_CA_CERT_BASE64` if set) as of the token's own `genTime`; the
+nonce matches; `genTime` isn't implausibly in the future — **and, the
+property a timestamp alone can't give you**, that the `AuditLog` row this
+anchor points at still exists with the exact hash that was anchored, and
+that `verifyAuditChain()`'s own walk reports no break at or before that
+row. That last pair is what makes an anchor prove something a plain
+hash-chain check alone cannot: even an attacker who edits an old entry and
+recomputes every hash forward from it (so the chain's own links look
+internally consistent again) cannot also retroactively obtain a new,
+independently-signed TSA token for the hash that existed before — see
+`scripts/test-audit-anchor-tamper.ts`, which performs exactly that attack
+and confirms `verifyAnchor()` still reports `TAMPERED` while
+`verifyAuditChain()` alone reports valid. `scripts/export-anchor-check.ts`
+writes an anchor's token out so it can also be checked with `openssl ts`,
+independent of this project's own code.
+
 **Double-sale prevention** — a `LandRecord` only accepts a new transaction
 while `status = ACTIVE` (checked in `routes/transactions.ts`), backed by a
 database-level partial unique index
@@ -154,9 +187,11 @@ this project's own code entirely.
 
 **Rate limiting and headers** (`middleware/rateLimit.ts`, `server.ts`) —
 `loginRateLimiter` (IP+email-keyed, skips successful attempts),
-`registerRateLimiter`, and `directoryLookupRateLimiter` (IP+user-keyed,
+`registerRateLimiter`, `directoryLookupRateLimiter` (IP+user-keyed,
 shared by `/api/users`, `/api/certificates/search`, and
-`/api/certificates/serial/:id`). `server.ts` applies `helmet()` globally.
+`/api/certificates/serial/:id`), and `anchorRateLimiter` (IP+user-keyed,
+`POST /api/audit/anchor` — on top of, not instead of,
+`TSA_MIN_INTERVAL_SECONDS`). `server.ts` applies `helmet()` globally.
 
 ## Limitations
 
@@ -167,8 +202,18 @@ shared by `/api/users`, `/api/certificates/search`, and
   or any other standard X.509 tooling — but there is no real-world chain
   of trust, OCSP, or third-party attestation behind the root. Trusting it
   at all means trusting this server, by construction; see `lib/ca.ts`.
-- **No trusted timestamping.** `issuedAt`/`thisUpdate`/`nextUpdate` are
-  this server's own clock, not a third-party timestamp authority.
+- **Trusted timestamping uses a public, free TSA — not a legally qualified
+  one.** The RFC 3161 anchors (`lib/timestamp.ts`) are cryptographically
+  genuine: a real third party (DigiCert's public TSA by default) signs a
+  token independent of this server's own clock, and `verifyAnchor()`
+  checks that signature, its certificate's chain, and the anchored entry's
+  integrity for real. But that TSA is not an eIDAS-qualified timestamp
+  authority or a CCA-licensed one in India — it carries no legal
+  evidentiary status, only a genuine cryptographic one. Anchoring is also
+  periodic (throttled by `TSA_MIN_INTERVAL_SECONDS`, triggered on
+  Registrar decisions and on demand), not per-entry — an entry written
+  between two anchors is only covered once a later anchor's chain-walk
+  reaches it, not individually.
 - **No integration with any government land record database.**
 - **The signed CRL's freshness window is 1 hour** (`CRL_VALIDITY_MS` in
   `lib/ca.ts`) — a revocation can take up to that long to be reflected in
@@ -184,7 +229,8 @@ shared by `/api/users`, `/api/certificates/search`, and
 lib/                 CA (ca.ts), signature verification (signing.ts),
                      prepare/submit nonces (signingNonce.ts), canonical
                      JSON (canonicalize.ts), audit hash chain (audit.ts),
-                     upload magic-byte detection (fileType.ts), Prisma client
+                     RFC 3161 trusted timestamping (timestamp.ts), upload
+                     magic-byte detection (fileType.ts), Prisma client
 middleware/          auth.ts (requireAuth/requireRole), rateLimit.ts
 routes/              One file per resource — auth, documents, land-records,
                      transactions, certificates, users, audit, dev (demo-only)
@@ -195,9 +241,11 @@ keys/                Issuing CA key pair + both CA certs (generated on first
 uploads/             Uploaded transaction documents (gitignored)
 scripts/             CA demo, admin bootstrap, first-run, attack simulation,
                      certificate-lookup/verify-client HTTP tests,
-                     export-cert-check (openssl-checkable PEM export), and
-                     crypto/signing test scripts
-test/                node --test unit tests (canonicalize, signing, certificate)
+                     export-cert-check / export-anchor-check (openssl-checkable
+                     PEM/token export), test-timestamp-live, and
+                     audit/crypto/signing test scripts
+test/                node --test unit tests (canonicalize, signing,
+                     certificate, x509Keys, timestamp)
 frontend/            Vite React app — src/pages, src/components, src/api;
                      src/lib/clientCrypto.ts (Web Crypto key handling),
                      src/lib/signAndSubmit.ts (prepare -> sign -> submit)
@@ -324,6 +372,24 @@ node scripts/export-cert-check.ts      # issues one real certificate and writes
                                         # plain PEM files, with the exact
                                         # `openssl verify`/`openssl x509 -text`
                                         # commands to check them independently
+node scripts/test-timestamp-live.ts    # one real RFC 3161 round trip against
+                                        # TSA_URL, verified; skips cleanly
+                                        # (not a failure) if the TSA is
+                                        # unreachable
+node scripts/export-anchor-check.ts    # writes the latest anchor's token as a
+                                        # .tsr file plus a bundle of this
+                                        # project's own trusted roots, with the
+                                        # exact `openssl ts` commands to check
+                                        # it independently
+node scripts/test-audit-anchor-tamper.ts # anchors, then tampers an anchored
+                                        # entry and recomputes every hash
+                                        # forward from it, proving verifyAnchor()
+                                        # still reports TAMPERED even though
+                                        # verifyAuditChain() alone reports valid
+                                        # — requires TEST_DATABASE_URL set equal
+                                        # to DATABASE_URL, same confirmation as
+                                        # attack-sim below (it permanently
+                                        # rewrites real AuditLog rows)
 npm run attack-sim                     # attack simulation — requires the API
                                         # running separately first, and
                                         # TEST_DATABASE_URL set equal to
@@ -338,13 +404,18 @@ npm run attack-sim                     # attack simulation — requires the API
 Current counts (as of this writing — re-run the commands above for the
 latest):
 
-- **`npm test`** — 20 `node --test` cases across `test/canonicalize.test.ts`
-  (7), `test/signing.test.ts` (5), `test/certificate.test.ts` (8):
+- **`npm test`** — 35 `node --test` cases across `test/canonicalize.test.ts`
+  (7), `test/signing.test.ts` (5), `test/certificate.test.ts` (8),
+  `test/x509Keys.test.ts` (8), `test/timestamp.test.ts` (7):
   canonicalization determinism and the shared backend/frontend test
-  vector, signature verify true/false paths, and certificate
-  valid/expired/revoked/tampered/issued-by-an-unknown-CA, plus the real
-  signed X.509 CRL listing a revoked serial, rejecting a CRL signed by the
-  wrong key, and distinguishing a stale CRL from a fresh one.
+  vector, signature verify true/false paths, certificate
+  valid/expired/revoked/tampered/issued-by-an-unknown-CA, the real signed
+  X.509 CRL, RSA key PEM round trips (file path, `*_BASE64` env path, CRLF,
+  no trailing newline, the exact pool-allocation condition that once broke
+  this — see report), and RFC 3161 anchor verification (genuine token,
+  wrong messageImprint, tampered CMS signature, wrong nonce, a certificate
+  missing the `timeStamping` EKU, and an untrusted root — each checked
+  against the specific one of `verifyAnchor()`'s steps it's expected to fail).
 - **`scripts/test-certificate-lookup.ts`** — 13 HTTP-level checks: role
   gating on certificate search, response shape (no private fields, no
   server-computed verdict), cache headers, and the `/api/users`
@@ -355,6 +426,11 @@ latest):
   certificate, plus a certificate chained to a forged intermediate CA, a
   CRL signed by the wrong key, and a stale CRL — each checked against the
   specific one of the five verify steps it's expected to fail.
+- **`scripts/test-timestamp-live.ts`** — one real TSA round trip, 6 checks
+  (the same live-reachable steps `verifyAnchor()` runs).
+- **`scripts/test-audit-anchor-tamper.ts`** — not yet run against the real
+  database (needs the `add_audit_anchor` migration applied first — see
+  report); written and sanity-checked for import/logic correctness only.
 - **`scripts/attack-simulation.ts`** — writes its results to
   `docs/attack-results.md` on every run; the most recent recorded result
   in that file is **12 of 12 attacks blocked** (dated in the file itself) —
@@ -419,11 +495,15 @@ pooled connection string into `DATABASE_URL`.
 | `JWT_SECRET` | long random string; **secret** |
 | `ROOT_CA_CERT_BASE64` | from first `first-run` (public cert only — no root private key var exists) |
 | `ISSUING_CA_PRIVATE_KEY_BASE64` / `ISSUING_CA_CERT_BASE64` | from first `first-run`; the private key var is a **secret** |
+| `TSA_URL` | leave unset for the default (DigiCert's public TSA) |
+| `TSA_TIMEOUT_MS` / `TSA_MIN_INTERVAL_SECONDS` | defaults `8000` / `600` |
+| `TSA_CA_CERT_BASE64` | only needed if `TSA_URL` points at a TSA whose root isn't already trusted; not a secret (a public certificate) |
 | `API_PUBLIC_URL` | this API's own public URL, e.g. `https://bhoomirakshak-api.onrender.com` — embedded as the CRL Distribution Point in every issued certificate |
 | `TRUST_PROXY` | leave unset (defaults to `1` when `NODE_ENV=production`) |
 | `ENABLE_DEMO_TAMPER` | `false` — keep off outside grading/demo |
 | `RATE_LIMIT_LOGIN_MAX` / `RATE_LIMIT_LOGIN_WINDOW_MS` | defaults `10` / `900000` (15 min) |
 | `RATE_LIMIT_REGISTER_MAX` / `RATE_LIMIT_REGISTER_WINDOW_MS` | defaults `20` / `3600000` (1 hr) |
+| `RATE_LIMIT_ANCHOR_MAX` / `RATE_LIMIT_ANCHOR_WINDOW_MS` | defaults `5` / `60000` (1 min) |
 | `PG_POOL_MAX` | default `10` |
 | `ADMIN_NAME` / `ADMIN_EMAIL` / `ADMIN_PASSWORD` | consumed once by `first-run`; `ADMIN_PASSWORD` **secret**, 10+ chars |
 | `FRONTEND_ORIGIN` | the deployed frontend's exact origin, e.g. `https://bhoomirakshak.vercel.app` |
