@@ -72,13 +72,24 @@ The public site (Home, How it works, About) deliberately keeps this detail
 out of view — this section holds what it leaves out, for anyone reading the
 code or grading it.
 
-**Certificate model** (`lib/ca.ts`) — not X.509. A certificate is a custom
-JSON payload (`subject, name, role, publicKey, issuer, issuedAt, expiresAt`),
-canonicalized (`lib/canonicalize.ts`) and signed with RSA-2048/SHA-256
-(`crypto.sign("RSA-SHA256", ...)`) by a single root CA key pair
-(`ensureRootCA()`). The stored `Certificate` row (`prisma/schema.prisma`)
-also carries a `fingerprint` (SHA-256 of the subject's public key) and the
-revocation fields (`revoked`, `revokedAt`, `revokedReason`).
+**Certificate model** (`lib/ca.ts`) — real X.509 v3, built with
+`@peculiar/x509` (no hand-rolled ASN.1 anywhere in this codebase). A
+two-tier chain: a self-signed **Root CA** (`CA:true, pathLen:1`), generated
+once and kept offline — its private key is written only to
+`keys/root-offline/root-ca-private.pem` by `scripts/first-run.ts` and is
+never loaded by the running server again — and an **Issuing CA**
+(`CA:true, pathLen:0`, signed by the root) that the server actually holds
+and signs user certificates with day to day. Every registered user gets a
+leaf certificate (`CA:false`, `KeyUsage: digitalSignature`, a
+`CRLDistributionPoints` extension pointing at this server's signed-CRL
+endpoint) with a genuine random 128-bit serial number, subject
+`CN=<name>,OU=<role>`. The stored `Certificate` row
+(`prisma/schema.prisma`) holds the real `certificatePem`, the X.509
+`serialNumber`, a `fingerprint` (SHA-256 of the certificate's DER bytes),
+and the revocation fields (`revoked`, `revokedAt`, `revokedReason`). The
+actor's public key for every signature check (`routes/transactions.ts`) is
+parsed out of their certificate (`publicKeyPemFromCertificatePem()`), not
+read from a separate stored column.
 
 **Client-side key generation and private-key storage** — covered above
 under "Client-side signing"
@@ -125,14 +136,21 @@ under a random UUID filename with an extension derived from the detected
 type, not the client-supplied one.
 
 **Signed CRL and client-side certificate verification** — `lib/ca.ts`'s
-`getSignedCRL()` publishes a CA-signed revocation list with
-`thisUpdate`/`nextUpdate` timestamps and a `type: "CRL"` domain-separation
-tag (so a CRL signature can never be mistaken for a certificate
-signature). `frontend/src/lib/certificateVerify.ts` independently verifies,
-entirely in the browser via WebCrypto: the certificate's CA signature, its
-validity window, the CRL's own signature and freshness, and whether the
-certificate's serial appears on the CRL — four checks, never a verdict
-computed only by the server.
+`getSignedCRL()` publishes a real, CA-signed X.509 CRL (`X509CrlGenerator`)
+with `thisUpdate`/`nextUpdate` timestamps, cached in memory for 3 minutes
+and explicitly invalidated on every revocation.
+`frontend/src/lib/certificateVerify.ts` independently verifies, entirely
+in the browser via WebCrypto (`@peculiar/x509`, the same library the
+backend issues with): the certificate chain's issuer-name linkage, both
+signatures in the chain (user→issuing, issuing→root), the validity window
+of all three certificates, the CRL's own signature and freshness, and
+whether either the certificate's or the Issuing CA's own serial appears on
+the CRL — five checks, never short-circuited and never a verdict computed
+only by the server (the lookup endpoints return raw PEMs, nothing
+server-judged). `scripts/export-cert-check.ts` issues one certificate and
+writes it, plus the issuing and root certificates, out as plain PEM files
+so the chain can also be checked with `openssl verify` — independent of
+this project's own code entirely.
 
 **Rate limiting and headers** (`middleware/rateLimit.ts`, `server.ts`) —
 `loginRateLimiter` (IP+email-keyed, skips successful attempts),
@@ -142,10 +160,13 @@ shared by `/api/users`, `/api/certificates/search`, and
 
 ## Limitations
 
-- **Custom certificate format, not X.509.** No ASN.1/DER structure, no
-  real serial-number field — `Certificate.id` (a cuid) stands in for one.
-- **Single root CA, operated by this system.** Not a licensed or
-  government-recognised certificate authority; see `lib/ca.ts`.
+- **This CA is operated by this system, not a licensed Certifying
+  Authority.** The two-tier chain (self-signed Root CA → Issuing CA →
+  user certificates, all real X.509 v3) demonstrates genuine PKI
+  mechanics — a certificate from this project will verify with `openssl`
+  or any other standard X.509 tooling — but there is no real-world chain
+  of trust, OCSP, or third-party attestation behind the root. Trusting it
+  at all means trusting this server, by construction; see `lib/ca.ts`.
 - **No trusted timestamping.** `issuedAt`/`thisUpdate`/`nextUpdate` are
   this server's own clock, not a third-party timestamp authority.
 - **No integration with any government land record database.**
@@ -168,10 +189,14 @@ middleware/          auth.ts (requireAuth/requireRole), rateLimit.ts
 routes/              One file per resource — auth, documents, land-records,
                      transactions, certificates, users, audit, dev (demo-only)
 prisma/schema.prisma Data model; prisma/migrations/ — migration history
-keys/                CA root key pair (generated on first run; gitignored)
+keys/                Issuing CA key pair + both CA certs (generated on first
+                     run; gitignored). keys/root-offline/ holds the Root CA
+                     private key only — never loaded by the running server
 uploads/             Uploaded transaction documents (gitignored)
 scripts/             CA demo, admin bootstrap, first-run, attack simulation,
-                     and crypto/signing test scripts
+                     certificate-lookup/verify-client HTTP tests,
+                     export-cert-check (openssl-checkable PEM export), and
+                     crypto/signing test scripts
 test/                node --test unit tests (canonicalize, signing, certificate)
 frontend/            Vite React app — src/pages, src/components, src/api;
                      src/lib/clientCrypto.ts (Web Crypto key handling),
@@ -294,9 +319,17 @@ node scripts/test-certificate-lookup.ts       # HTTP-level: role gating, respons
 node scripts/test-certificate-verify-client.ts # the actual browser verify helper
                                                # against real signed data (server
                                                # must already be running)
+node scripts/export-cert-check.ts      # issues one real certificate and writes
+                                        # it (plus the issuing/root certs) as
+                                        # plain PEM files, with the exact
+                                        # `openssl verify`/`openssl x509 -text`
+                                        # commands to check them independently
 npm run attack-sim                     # attack simulation — requires the API
-                                        # running separately first; prints a
-                                        # pass/fail table and writes it to
+                                        # running separately first, and
+                                        # TEST_DATABASE_URL set equal to
+                                        # DATABASE_URL as an explicit
+                                        # confirmation; prints a pass/fail
+                                        # table and writes it to
                                         # docs/attack-results.md; exits non-zero
                                         # if any attack that should have been
                                         # blocked instead succeeded
@@ -305,21 +338,27 @@ npm run attack-sim                     # attack simulation — requires the API
 Current counts (as of this writing — re-run the commands above for the
 latest):
 
-- **`npm test`** — 17 `node --test` cases across `test/canonicalize.test.ts`,
-  `test/signing.test.ts`, `test/certificate.test.ts`: canonicalization
-  determinism and the shared backend/frontend test vector, signature
-  verify true/false paths, and certificate valid/expired/revoked/tampered,
-  plus the signed CRL listing a revoked serial.
+- **`npm test`** — 20 `node --test` cases across `test/canonicalize.test.ts`
+  (7), `test/signing.test.ts` (5), `test/certificate.test.ts` (8):
+  canonicalization determinism and the shared backend/frontend test
+  vector, signature verify true/false paths, and certificate
+  valid/expired/revoked/tampered/issued-by-an-unknown-CA, plus the real
+  signed X.509 CRL listing a revoked serial, rejecting a CRL signed by the
+  wrong key, and distinguishing a stale CRL from a fresh one.
 - **`scripts/test-certificate-lookup.ts`** — 13 HTTP-level checks: role
   gating on certificate search, response shape (no private fields, no
   server-computed verdict), cache headers, and the `/api/users`
   enumeration fix.
-- **`scripts/test-certificate-verify-client.ts`** — 10 checks exercising
+- **`scripts/test-certificate-verify-client.ts`** — 22 checks exercising
   `frontend/src/lib/certificateVerify.ts` itself (not a reimplementation)
-  against a genuine, a tampered, and a revoked certificate.
+  against a genuine, a tampered, a backdated/expired, and a revoked
+  certificate, plus a certificate chained to a forged intermediate CA, a
+  CRL signed by the wrong key, and a stale CRL — each checked against the
+  specific one of the five verify steps it's expected to fail.
 - **`scripts/attack-simulation.ts`** — writes its results to
   `docs/attack-results.md` on every run; the most recent recorded result
-  in that file is **12 of 12 attacks blocked** (dated in the file itself).
+  in that file is **12 of 12 attacks blocked** (dated in the file itself) —
+  not yet re-run since the X.509 rework (see report).
 
 ## Deploying
 
@@ -354,13 +393,21 @@ pooled connection string into `DATABASE_URL`.
    **Secrets**, not plain env vars.
 3. First deploy only: run `npm run first-run` once against the production
    environment (Render's "Shell" tab on the service, or a one-off Job) to
-   apply migrations, create/load the CA key pair, and create the first
-   ADMIN account. It's safe to run again on later deploys — every step is a
-   no-op if already done, **except** that if it had to *generate* a CA key
-   pair, it prints the `CA_PRIVATE_KEY_BASE64` / `CA_PUBLIC_KEY_BASE64`
-   values once; copy those into Render's env vars immediately; Render's
-   filesystem is ephemeral, so without this the CA key (and every
-   certificate ever issued) is lost on the next redeploy.
+   apply migrations, bootstrap the two-tier CA hierarchy, and create the
+   first ADMIN account. It's safe to run again on later deploys — every
+   step is a no-op if already done, **except** that if it had to
+   *generate* the CA hierarchy for the first time, it prints
+   `ROOT_CA_CERT_BASE64` plus the Issuing CA's `ISSUING_CA_PRIVATE_KEY_BASE64`
+   / `ISSUING_CA_CERT_BASE64` once; copy all three into Render's env vars
+   immediately. The Root CA's *private* key is never printed — it's written
+   only to `keys/root-offline/root-ca-private.pem` on whatever machine ran
+   `first-run`, deliberately off of Render's ephemeral filesystem; move
+   that one file to real cold storage and keep it off any server. Without
+   saving the three printed values, the Issuing CA (and every certificate
+   it's issued) is lost on the next redeploy — but note that losing it
+   does *not* let you silently regenerate a replacement Issuing CA from the
+   same root, since the root private key is deliberately not on this
+   server either.
 4. Subsequent deploys: just redeploy the image. `node server.ts` (the
    container's `CMD`) does not run migrations itself by design — rerun
    `npm run first-run` (or at least `npx prisma migrate deploy`) after any
@@ -370,7 +417,9 @@ pooled connection string into `DATABASE_URL`.
 |---|---|
 | `DATABASE_URL` | Neon production connection string |
 | `JWT_SECRET` | long random string; **secret** |
-| `CA_PRIVATE_KEY_BASE64` / `CA_PUBLIC_KEY_BASE64` | from first `first-run`; **secrets** |
+| `ROOT_CA_CERT_BASE64` | from first `first-run` (public cert only — no root private key var exists) |
+| `ISSUING_CA_PRIVATE_KEY_BASE64` / `ISSUING_CA_CERT_BASE64` | from first `first-run`; the private key var is a **secret** |
+| `API_PUBLIC_URL` | this API's own public URL, e.g. `https://bhoomirakshak-api.onrender.com` — embedded as the CRL Distribution Point in every issued certificate |
 | `TRUST_PROXY` | leave unset (defaults to `1` when `NODE_ENV=production`) |
 | `ENABLE_DEMO_TAMPER` | `false` — keep off outside grading/demo |
 | `RATE_LIMIT_LOGIN_MAX` / `RATE_LIMIT_LOGIN_WINDOW_MS` | defaults `10` / `900000` (15 min) |
@@ -406,10 +455,11 @@ See `.env.example` for the full list with descriptions.
   a sanity floor, not a load-test result — a proper load test (e.g. k6 or
   autocannon hitting a deployed instance) was out of scope for this pass.
 - **This is a prototype CA, not a legally recognized one.** Certificates
-  are self-issued by this application's own root key — there is no
-  real-world chain of trust, OCSP, or third-party attestation. It
-  demonstrates the mechanics of PKI-based trust (issuance, expiry,
-  revocation, signature verification), not a production CA.
+  are real X.509 v3, issued through a genuine two-tier chain (root →
+  issuing), but that chain is entirely self-issued by this application —
+  there is no real-world chain of trust, OCSP, or third-party attestation.
+  It demonstrates the mechanics of PKI-based trust (issuance, expiry,
+  revocation, signature verification, chain validation), not a production CA.
 - See also the application-level Known Limits below (server-served JS,
   no password recovery, etc.) — those apply in any environment, not just
   this deployment.
