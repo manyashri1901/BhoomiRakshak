@@ -44,7 +44,7 @@ function CAFingerprintNote({ caInfo }: { caInfo: CAInfo | null }) {
           </div>
           <p className="mt-2 text-sm text-slate-500">
             Every check below verifies against this exact root certificate, fetched from this same
-            server. That is a convenience for this build, not a complete trust story — in a
+            server. That is a convenience for this system, not a complete trust story — in a
             production deployment the root certificate (or this fingerprint) would be pinned into
             the client application or OS trust store out-of-band, not fetched live from the server
             it's meant to be checking.

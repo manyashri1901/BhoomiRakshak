@@ -39,7 +39,7 @@ function NavItems({ items, onNavigate }: { items: SidebarNavItem[]; onNavigate?:
 export function Sidebar({ items, mobileOpen, onClose }: SidebarProps) {
   return (
     <>
-      <aside className="hidden w-60 shrink-0 border-r border-slate-200 bg-white px-3 py-5 md:block">
+      <aside className="hidden w-60 shrink-0 border-r border-slate-200 px-3 py-5 md:block">
         <NavItems items={items} />
       </aside>
 

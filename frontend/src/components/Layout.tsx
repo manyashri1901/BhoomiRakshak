@@ -278,7 +278,7 @@ export function Layout() {
       </div>
 
       {user ? (
-        <footer className="border-t border-slate-200 bg-white py-4 text-center text-xs text-slate-500">
+        <footer className="border-t border-slate-200 bg-white py-4 text-center text-[13px] text-slate-500">
           BhoomiRakshak — PKI-based Secure Land Record &amp; Ownership Management System
         </footer>
       ) : (

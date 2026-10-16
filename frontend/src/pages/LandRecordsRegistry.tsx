@@ -42,7 +42,7 @@ export function LandRecordsRegistry() {
       />
 
       {error && <ErrorState label={error} />}
-      {!error && records !== null && records.length === 0 && <EmptyState label="No land records found." />}
+      {!error && records !== null && records.length === 0 && <EmptyState label="No land records to show yet." />}
 
       {!error && (records === null || records.length > 0) && (
         <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">

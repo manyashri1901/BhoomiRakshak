@@ -171,7 +171,7 @@ export function LandownerDashboard() {
       {loadError && <ErrorState label={loadError} />}
 
       {!loadError && records !== null && records.length === 0 && (
-        <EmptyState label="No land records are registered under your name yet. A Registrar must create one first." />
+        <EmptyState label="Your land parcels will appear here once a Registrar registers them to you." />
       )}
 
       {!loadError && (records === null || records.length > 0) && (

@@ -89,11 +89,11 @@ function TransactionCard({ transaction, canTamper, onTampered }: TransactionCard
               loading={tampering}
               icon={<FlaskConical className="h-4 w-4" aria-hidden="true" />}
             >
-              {tampering ? "Tampering…" : "Simulate Tamper (Demo)"}
+              {tampering ? "Tampering…" : "Simulate tampering (test mode)"}
             </Button>
             <p className="mt-1.5 flex items-start gap-1.5 text-xs text-slate-500">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-              Demo only — directly overwrites the stored document hash in the database, bypassing
+              Test mode only — directly overwrites the stored document hash in the database, bypassing
               the signing flow entirely, to prove verification catches it.
             </p>
           </div>
