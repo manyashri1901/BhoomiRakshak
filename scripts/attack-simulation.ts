@@ -49,10 +49,24 @@ if (!process.env.TEST_DATABASE_URL || process.env.TEST_DATABASE_URL !== process.
   process.exit(1);
 }
 
+// No hardcoded fallback credentials — this repo is public, and a
+// placeholder admin login here would be exactly the kind of thing that
+// looks like a real, forgotten credential. Both must be set explicitly,
+// matching a real ADMIN account in whatever database TEST_DATABASE_URL
+// points at.
+if (!process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD) {
+  console.error(
+    "Refusing to run: ADMIN_EMAIL and ADMIN_PASSWORD env vars must both be set, matching an " +
+      "existing ADMIN account on the database TEST_DATABASE_URL points at (this script logs in " +
+      "as that admin to exercise the revoke-certificate attack).",
+  );
+  process.exit(1);
+}
+
 const BASE = "http://localhost:4000/api";
 const PASSWORD = "attacktest123";
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL ?? "shrimanya2@gmail.com";
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "AdminPass123!";
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
 interface AttackResult {
   attack: string;
