@@ -213,13 +213,10 @@ function PublicNav() {
 
 function PublicFooter() {
   return (
-    <footer className="border-t border-slate-200 bg-white py-8">
-      <div className="mx-auto flex max-w-300 flex-wrap items-center justify-center gap-x-2 gap-y-1 px-4 text-center text-sm text-slate-600 sm:px-6">
-        <span>BhoomiRakshak - a PKI-based land record security project by Manya Shrivastava</span>
-        <Link to="/about" className="font-medium text-navy underline">
-          About
-        </Link>
-      </div>
+    <footer className="border-t border-slate-200 bg-white py-4">
+      <p className="mx-auto max-w-300 px-4 text-center text-[13px] text-slate-500 sm:px-6">
+        BhoomiRakshak - a PKI-based land record security project by Manya Shrivastava
+      </p>
     </footer>
   );
 }

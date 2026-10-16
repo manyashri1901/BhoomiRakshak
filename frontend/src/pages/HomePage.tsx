@@ -174,8 +174,8 @@ export function HomePage() {
               <Link to="/register" className={buttonVariantClasses("teal", "px-6 py-3")}>
                 Get started
               </Link>
-              <Link to="/how-it-works" className={buttonVariantClasses("secondary", "px-6 py-3")}>
-                See how it works
+              <Link to="/login" className={buttonVariantClasses("secondary", "px-6 py-3")}>
+                Log in
               </Link>
             </div>
             <div className="mt-7 flex flex-wrap gap-5">
@@ -236,17 +236,9 @@ export function HomePage() {
 
       <section className={SECTION_PADDING}>
         <div className={CONTAINER}>
-          <Reveal className="mb-10 flex flex-wrap items-end justify-between gap-5">
-            <div>
-              <span className={SECTION_LABEL}>How it works</span>
-              <h2 className={`${H2} mb-0`}>Three roles. Three signatures.</h2>
-            </div>
-            <Link
-              to="/how-it-works"
-              className={buttonVariantClasses("ghost", "px-0! text-teal! hover:bg-transparent! hover:text-teal-hover!")}
-            >
-              Explore the workflow <ArrowRight className="h-4 w-4" aria-hidden="true" />
-            </Link>
+          <Reveal className="mb-10">
+            <span className={SECTION_LABEL}>How it works</span>
+            <h2 className={`${H2} mb-0`}>Three roles. Three signatures.</h2>
           </Reveal>
           <div className="grid grid-cols-1 gap-7 md:grid-cols-3">
             {ROLES.map(({ title, description, icon: Icon }, i) => (
@@ -344,8 +336,8 @@ export function HomePage() {
         <Reveal className={CONTAINER}>
           <div className="flex flex-col items-start gap-8 rounded-2xl bg-navy p-8 text-white sm:p-14 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <span className="block text-sm font-bold uppercase tracking-[0.11em] text-teal/70">
-                See it in action
+              <span className="block text-sm font-bold uppercase tracking-[0.11em] text-white/70">
+                Get started
               </span>
               <h2 className="mt-4 text-[clamp(28px,3.5vw,38px)] font-semibold leading-tight tracking-[-0.035em] text-white">
                 See the workflow end to end
@@ -359,10 +351,10 @@ export function HomePage() {
                 Get started
               </Link>
               <Link
-                to="/how-it-works"
+                to="/login"
                 className="inline-flex items-center justify-center gap-2 rounded-lg border border-white/30 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-white/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
               >
-                How it works
+                Log in
               </Link>
             </div>
           </div>
