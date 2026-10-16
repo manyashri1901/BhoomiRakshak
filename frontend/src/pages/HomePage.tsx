@@ -1,4 +1,3 @@
-import { Link } from "react-router-dom";
 import {
   ArrowRight,
   CheckCircle2,
@@ -12,7 +11,6 @@ import {
 } from "lucide-react";
 import { Reveal } from "../components/ui/Reveal";
 import { Card } from "../components/Card";
-import { buttonVariantClasses } from "../components/ui/buttonVariants";
 import { H1, H2, SECTION_LABEL, CONTAINER, SECTION_PADDING } from "../components/ui/typography";
 
 const TRUST_POINTS = ["Signed by verified identities", "Tamper-checked documents", "Tamper-evident audit log"];
@@ -170,15 +168,7 @@ export function HomePage() {
               Every registration and approval is digitally signed by a verified identity. Every
               document is fingerprinted. Change anything afterwards and the system shows it.
             </p>
-            <div className="mt-7 flex flex-wrap items-center gap-3">
-              <Link to="/register" className={buttonVariantClasses("teal", "px-6 py-3")}>
-                Get started
-              </Link>
-              <Link to="/login" className={buttonVariantClasses("secondary", "px-6 py-3")}>
-                Log in
-              </Link>
-            </div>
-            <div className="mt-7 flex flex-wrap gap-5">
+            <div className="mt-8 flex flex-wrap gap-5">
               {TRUST_POINTS.map((text) => (
                 <span key={text} className="flex items-center gap-1.5 text-sm text-slate-600">
                   <CheckCircle2 className="h-4 w-4 text-teal" aria-hidden="true" />
@@ -334,29 +324,16 @@ export function HomePage() {
 
       <section className="px-4 pb-14 sm:px-0 sm:pb-18 lg:pb-24">
         <Reveal className={CONTAINER}>
-          <div className="flex flex-col items-start gap-8 rounded-2xl bg-navy p-8 text-white sm:p-14 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <span className="block text-sm font-bold uppercase tracking-[0.11em] text-white/70">
-                Get started
-              </span>
-              <h2 className="mt-4 text-[clamp(28px,3.5vw,38px)] font-semibold leading-tight tracking-[-0.035em] text-white">
-                See the workflow end to end
-              </h2>
-              <p className="mt-2 max-w-md text-sm text-slate-300">
-                Create an account, submit a record, and see how each signature builds trust.
-              </p>
-            </div>
-            <div className="flex shrink-0 flex-wrap gap-3">
-              <Link to="/register" className={buttonVariantClasses("white", "px-6 py-3")}>
-                Get started
-              </Link>
-              <Link
-                to="/login"
-                className="inline-flex items-center justify-center gap-2 rounded-lg border border-white/30 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-white/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
-              >
-                Log in
-              </Link>
-            </div>
+          <div className="rounded-2xl bg-navy p-8 text-white sm:p-14">
+            <span className="block text-sm font-bold uppercase tracking-[0.11em] text-white/70">
+              Get started
+            </span>
+            <h2 className="mt-4 text-[clamp(28px,3.5vw,38px)] font-semibold leading-tight tracking-[-0.035em] text-white">
+              See the workflow end to end
+            </h2>
+            <p className="mt-2 max-w-md text-sm text-slate-300">
+              Create an account, submit a record, and see how each signature builds trust.
+            </p>
           </div>
         </Reveal>
       </section>
