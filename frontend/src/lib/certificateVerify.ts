@@ -1,57 +1,58 @@
 // frontend/src/lib/certificateVerify.ts
 //
-// Client-side certificate + CRL verification — entirely in the browser,
-// using WebCrypto. This is the ONLY place that decides whether a
-// certificate is trustworthy for display on the Certificate Lookup page:
-// the server's lookup responses carry no "valid"/"reason" verdict at all
-// (see routes/certificates.ts's /serial/:id and /crl/signed) specifically
+// Client-side X.509 certificate + CRL verification — entirely in the
+// browser, using @peculiar/x509 (no hand-rolled ASN.1 anywhere in this
+// codebase; see lib/ca.ts on the backend for the matching issuance side).
+// This is the ONLY place that decides whether a certificate is
+// trustworthy for display on the Certificate Lookup page: the server's
+// lookup responses carry no "valid"/"reason" verdict at all (see
+// routes/certificates.ts's /serial/:serial and /crl/signed) specifically
 // so there is nothing server-computed to blindly trust here.
 //
-// Four independent checks, matching lib/ca.ts's own verifyCertificate()
-// logic but re-run from scratch against data the browser fetched itself:
-//   1. signature      — the certificate's CA signature verifies against
-//                        the CA's own public key.
-//   2. validity        — the current time is within [issuedAt, expiresAt].
-//   3. crlFreshness    — the CRL's own CA signature verifies, and the
-//                        current time has not passed the CRL's nextUpdate.
-//   4. revocation      — the certificate's serial is not present in the
-//                        CRL's revokedSerials list.
-// All four are computed unconditionally (never short-circuited) so the UI
-// can show a per-step ✓/✗ even when an earlier step already failed.
-//
-// Domain separation: the CRL payload includes an explicit `type: "CRL"`
-// field that the certificate payload deliberately does NOT have — see the
-// long comment on getSignedCRL() in lib/ca.ts for why retrofitting an
-// equivalent tag onto certificates would invalidate every certificate
-// already issued, and why the two payloads' already-disjoint field sets
-// make that safe to leave as-is for certificates.
+// Five independent checks, never short-circuited, so the UI can show a
+// per-step ✓/✗ even when an earlier step already failed:
+//   1. issuerChain    — the certificate NAMES link up correctly (user's
+//                       issuer = issuing CA's subject; issuing CA's
+//                       issuer = root's subject; root is self-issued).
+//                       A purely structural check, independent of whether
+//                       any signature is genuine — see "signatures" below
+//                       for that.
+//   2. signatures     — the user certificate's signature verifies against
+//                       the issuing CA's public key, AND the issuing CA's
+//                       own certificate's signature verifies against the
+//                       root's public key.
+//   3. validity        — the current time is within [notBefore, notAfter]
+//                       for the user certificate, the issuing CA
+//                       certificate, AND the root certificate.
+//   4. crlFreshness    — the CRL's own CA signature verifies (against the
+//                       issuing CA), and the current time has not passed
+//                       the CRL's nextUpdate.
+//   5. revocation      — neither the user certificate's serial NOR the
+//                       issuing CA's own certificate's serial appears in
+//                       the CRL's revoked list.
 
-import { canonicalStringify } from "./canonicalize.ts";
-
-const RSA_VERIFY_ALGORITHM = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" } as const;
+import "./x509Setup.ts";
+import * as x509 from "@peculiar/x509";
 
 export interface CertificateEnvelope {
-  serial: string;
-  subject: string;
-  name: string;
-  role: string;
-  publicKey: string;
-  issuer: string;
-  issuedAt: string;
-  expiresAt: string;
-  signature: string;
+  serialNumber: string;
+  certificatePem: string;
+  issuingCertificatePem: string;
+}
+
+export interface CAInfo {
+  rootCertPem: string;
+  issuingCertPem: string;
+  fingerprint: string;
 }
 
 export interface SignedCRL {
-  type: "CRL";
-  issuer: string;
+  pem: string;
   thisUpdate: string;
   nextUpdate: string;
-  revokedSerials: string[];
-  signature: string;
 }
 
-export type VerifyStepId = "signature" | "validity" | "crlFreshness" | "revocation";
+export type VerifyStepId = "issuerChain" | "signatures" | "validity" | "crlFreshness" | "revocation";
 
 export interface VerifyStep {
   id: VerifyStepId;
@@ -64,150 +65,136 @@ export interface VerifyResult {
   valid: boolean;
   steps: VerifyStep[];
   failingStep: VerifyStepId | null;
-}
-
-function base64ToBuffer(base64: string): ArrayBuffer {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
-}
-
-/** PEM -> DER (strips the header/footer lines and whitespace, base64-decodes
- * the rest) -> a non-extractable, verify-only CryptoKey. The inverse of
- * exportPublicKeySpkiPem() in clientCrypto.ts, which this file does not
- * import from — this helper only ever IMPORTS someone else's public key
- * to verify a signature, never touches key generation/signing/wrapping. */
-async function importSpkiPublicKeyPem(pem: string): Promise<CryptoKey> {
-  const der = pem
-    .replace(/-----BEGIN PUBLIC KEY-----/, "")
-    .replace(/-----END PUBLIC KEY-----/, "")
-    .replace(/\s+/g, "");
-  return crypto.subtle.importKey("spki", base64ToBuffer(der), RSA_VERIFY_ALGORITHM, false, ["verify"]);
-}
-
-async function verifySignatureBytes(
-  publicKeyPem: string,
-  canonicalPayload: string,
-  signatureBase64: string,
-): Promise<boolean> {
-  try {
-    const key = await importSpkiPublicKeyPem(publicKeyPem);
-    const signatureBytes = base64ToBuffer(signatureBase64);
-    return await crypto.subtle.verify(
-      RSA_VERIFY_ALGORITHM,
-      key,
-      signatureBytes,
-      new TextEncoder().encode(canonicalPayload),
-    );
-  } catch {
-    // A malformed PEM/signature/base64 value is itself a verification
-    // failure, not an error the caller should have to handle separately.
-    return false;
-  }
+  // Surfaced for display (item 8: "Show serial number and fingerprint").
+  serialNumber: string;
+  fingerprint: string;
+  subject: string;
 }
 
 function step(id: VerifyStepId, label: string, pass: boolean, detail: string): VerifyStep {
   return { id, label, pass, detail };
 }
 
+async function fingerprintOf(cert: x509.X509Certificate): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", cert.rawData);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 /**
- * Verifies one certificate against one CA public key and one signed CRL —
- * all three already fetched by the caller (see api/certificates.ts). Never
- * makes a network request itself, and never trusts any verdict field the
- * server might have attached to any of its three inputs (there isn't one,
- * by design, but this function wouldn't look at it even if there were).
+ * Verifies one user certificate against the issuing + root CA
+ * certificates and one signed CRL — all fetched by the caller (see
+ * api/certificates.ts). Never makes a network request itself, and never
+ * trusts any verdict field the server might have attached to any of its
+ * inputs (there isn't one, by design, but this function wouldn't look at
+ * it even if there were).
  */
 export async function verifyCertificateClientSide(
-  certificate: CertificateEnvelope,
-  caPublicKeyPem: string,
-  crl: SignedCRL,
+  envelope: CertificateEnvelope,
+  caInfo: CAInfo,
+  signedCrl: SignedCRL,
 ): Promise<VerifyResult> {
-  // 1. Signature — rebuild the EXACT payload lib/ca.ts's
-  // buildCertificatePayload() signed (same key set, same key order is
-  // irrelevant since canonicalStringify sorts keys itself).
-  const certificatePayload = {
-    subject: certificate.subject,
-    name: certificate.name,
-    role: certificate.role,
-    publicKey: certificate.publicKey,
-    issuer: certificate.issuer,
-    issuedAt: certificate.issuedAt,
-    expiresAt: certificate.expiresAt,
-  };
-  const signatureValid = await verifySignatureBytes(
-    caPublicKeyPem,
-    canonicalStringify(certificatePayload),
-    certificate.signature,
-  );
+  const userCert = new x509.X509Certificate(envelope.certificatePem);
+  const issuingCert = new x509.X509Certificate(envelope.issuingCertificatePem);
+  const rootCert = new x509.X509Certificate(caInfo.rootCertPem);
 
-  // 2. Validity window.
-  const now = Date.now();
-  const issuedAtMs = Date.parse(certificate.issuedAt);
-  const expiresAtMs = Date.parse(certificate.expiresAt);
-  const withinValidityWindow = now >= issuedAtMs && now <= expiresAtMs;
+  // 1. Issuer chain — names only, deliberately checked independently of
+  // any signature: a forged certificate could print ANY issuer name it
+  // likes, so this step alone proves nothing on its own, but a MISMATCH
+  // here means the chain is structurally broken regardless of what the
+  // signature step finds.
+  const userLinksToIssuing = userCert.issuer === issuingCert.subject;
+  const issuingLinksToRoot = issuingCert.issuer === rootCert.subject;
+  const rootIsSelfIssued = rootCert.issuer === rootCert.subject;
+  const issuerChainValid = userLinksToIssuing && issuingLinksToRoot && rootIsSelfIssued;
 
-  // 3. CRL freshness — its OWN signature must verify (over its full
-  // payload including the "type":"CRL" tag), and "now" must not be past
-  // its stated nextUpdate. A CRL that fails either check can't be trusted
-  // to answer the revocation question at all, regardless of what it says.
-  const crlPayload = {
-    type: crl.type,
-    issuer: crl.issuer,
-    thisUpdate: crl.thisUpdate,
-    nextUpdate: crl.nextUpdate,
-    revokedSerials: crl.revokedSerials,
-  };
-  const crlSignatureValid = await verifySignatureBytes(
-    caPublicKeyPem,
-    canonicalStringify(crlPayload),
-    crl.signature,
-  );
-  const crlNotExpired = now <= Date.parse(crl.nextUpdate);
-  const crlFresh = crlSignatureValid && crlNotExpired;
+  // 2. Signatures — the actual cryptographic proof behind each link above.
+  // signatureOnly: true is required here — @peculiar/x509's X509Certificate
+  // .verify() otherwise ALSO folds in the certificate's own notBefore/
+  // notAfter window by default and silently returns false for a genuinely,
+  // correctly signed but merely-expired certificate, which would make this
+  // step indistinguishable from an actually forged signature. "validity"
+  // below is the step responsible for the time window; this step is
+  // deliberately pure cryptography only.
+  const userSignatureValid = await userCert.verify({ publicKey: issuingCert.publicKey, signatureOnly: true });
+  const issuingSignatureValid = await issuingCert.verify({ publicKey: rootCert.publicKey, signatureOnly: true });
+  const signaturesValid = userSignatureValid && issuingSignatureValid;
 
-  // 4. Revocation — only meaningful if the CRL itself is trustworthy;
-  // reported as its own step regardless, so the UI can show *why* (a
-  // revoked serial vs. an untrustworthy CRL are different failure
-  // reasons a viewer should be able to tell apart).
-  const isRevoked = crl.revokedSerials.includes(certificate.serial);
+  // 3. Validity — all three certificates, independently.
+  const now = new Date();
+  const userWithinWindow = now >= userCert.notBefore && now <= userCert.notAfter;
+  const issuingWithinWindow = now >= issuingCert.notBefore && now <= issuingCert.notAfter;
+  const rootWithinWindow = now >= rootCert.notBefore && now <= rootCert.notAfter;
+  const validityValid = userWithinWindow && issuingWithinWindow && rootWithinWindow;
+
+  // 4. CRL freshness — its own signature must verify (against the issuing
+  // CA), and "now" must not be past its stated nextUpdate.
+  const crl = new x509.X509Crl(signedCrl.pem);
+  const crlSignatureValid = await crl.verify({ publicKey: issuingCert.publicKey });
+  const crlNotExpired = now <= (crl.nextUpdate ?? new Date(0));
+  const crlFreshValid = crlSignatureValid && crlNotExpired;
+
+  // 5. Revocation — both the user certificate's serial and the issuing
+  // CA's own serial are checked against the CRL; only meaningful if the
+  // CRL itself is trustworthy (step 4), but reported as its own step
+  // regardless, so the UI can show *why* (a revoked serial vs. an
+  // untrustworthy CRL are different failure reasons a viewer should be
+  // able to tell apart).
+  const userRevoked = Boolean(crl.findRevoked(userCert.serialNumber));
+  const issuingRevoked = Boolean(crl.findRevoked(issuingCert.serialNumber));
+  const revocationValid = !userRevoked && !issuingRevoked;
 
   const steps: VerifyStep[] = [
     step(
-      "signature",
-      "Signature",
-      signatureValid,
-      signatureValid
-        ? "The CA's signature over this certificate verifies."
-        : "The CA's signature does not match this certificate's contents — it is forged or has been tampered with.",
+      "issuerChain",
+      "Issuer chain",
+      issuerChainValid,
+      issuerChainValid
+        ? `${userCert.subject} -> ${issuingCert.subject} -> ${rootCert.subject} (self-issued).`
+        : "The certificate's issuer name does not lead to this root through the issuing CA — the chain is structurally broken.",
+    ),
+    step(
+      "signatures",
+      "Signatures",
+      signaturesValid,
+      signaturesValid
+        ? "Both the user certificate's and the Issuing CA's signatures verify."
+        : !userSignatureValid
+          ? "The user certificate's signature does not verify against the Issuing CA's public key — forged or tampered."
+          : "The Issuing CA's own certificate does not verify against the Root CA's public key.",
     ),
     step(
       "validity",
       "Validity",
-      withinValidityWindow,
-      withinValidityWindow
-        ? `Valid from ${certificate.issuedAt} to ${certificate.expiresAt}.`
-        : now < issuedAtMs
-          ? "This certificate is not yet valid."
-          : `This certificate expired on ${certificate.expiresAt}.`,
+      validityValid,
+      validityValid
+        ? `All three certificates are within their validity window (checked at ${now.toISOString()}).`
+        : !userWithinWindow
+          ? `The user certificate is outside its validity window (${userCert.notBefore.toISOString()} – ${userCert.notAfter.toISOString()}).`
+          : !issuingWithinWindow
+            ? "The Issuing CA certificate is outside its validity window."
+            : "The Root CA certificate is outside its validity window.",
     ),
     step(
       "crlFreshness",
       "CRL freshness",
-      crlFresh,
+      crlFreshValid,
       !crlSignatureValid
-        ? "The revocation list's own CA signature does not verify — its contents cannot be trusted."
+        ? "The revocation list's own signature does not verify against the Issuing CA — its contents cannot be trusted."
         : crlNotExpired
-          ? `Revocation list is current (valid until ${crl.nextUpdate}).`
-          : `Revocation list expired on ${crl.nextUpdate} — a newer one is needed before revocation can be checked.`,
+          ? `Revocation list is current (valid until ${crl.nextUpdate?.toISOString()}).`
+          : `Revocation list expired on ${crl.nextUpdate?.toISOString()} — a newer one is needed before revocation can be checked.`,
     ),
     step(
       "revocation",
       "Revocation",
-      !isRevoked,
-      isRevoked
+      revocationValid,
+      userRevoked
         ? "This certificate's serial appears on the revocation list."
-        : "This certificate's serial does not appear on the revocation list.",
+        : issuingRevoked
+          ? "The Issuing CA's own certificate appears on the revocation list."
+          : "Neither this certificate's serial nor the Issuing CA's own serial appears on the revocation list.",
     ),
   ];
 
@@ -217,5 +204,8 @@ export async function verifyCertificateClientSide(
     valid: steps.every((s) => s.pass),
     steps,
     failingStep: failing ? failing.id : null,
+    serialNumber: userCert.serialNumber,
+    fingerprint: await fingerprintOf(userCert),
+    subject: userCert.subject,
   };
 }

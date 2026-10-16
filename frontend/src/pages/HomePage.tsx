@@ -13,26 +13,12 @@ import {
 import { Reveal } from "../components/ui/Reveal";
 import { Card } from "../components/Card";
 import { buttonVariantClasses } from "../components/ui/buttonVariants";
+import { H1, H2, SECTION_LABEL, CONTAINER, SECTION_PADDING } from "../components/ui/typography";
 
-// Shared heading treatment — matches the reference design's h1/h2 exactly
-// (navy color, tight tracking, clamp()-based fluid size) without repeating
-// the class string at every call site.
-const H1 =
-  "text-[clamp(43px,5vw,56px)] font-semibold leading-[1.03] tracking-[-0.035em] text-navy";
-const H2 =
-  "text-[clamp(34px,4vw,46px)] font-semibold leading-[1.08] tracking-[-0.035em] text-navy";
-const SECTION_LABEL = "block text-sm font-bold uppercase tracking-[0.11em] text-teal";
-// Reused per-section horizontal container — 1152px, matching the
-// reference design (Layout's own shared chrome stays at its existing
-// 1200px; this is a narrower, page-local content width within it).
-const CONTAINER = "mx-auto w-full max-w-288";
-// 96px desktop / 72px tablet / 56px mobile, per spec.
-const SECTION_PADDING = "py-14 sm:py-18 lg:py-24";
+const TRUST_POINTS = ["Signed by verified identities", "Tamper-checked documents", "Tamper-evident audit log"];
 
-const TRUST_POINTS = ["Signed by verified identities", "Hash-checked documents", "Tamper-evident audit log"];
-
-// Fixed sample data for the hero's record panel only — never a real
-// record. Honesty fix: a visible "Sample" pill in the header, plus a
+// Fixed illustrative data for the hero's record panel only — never a real
+// record. Honesty fix: a visible "Example" pill in the header, plus a
 // muted caption under the panel, so it can never be mistaken for a live
 // result (names and plot data kept as in the reference design).
 const TIMELINE: [string, string][] = [
@@ -48,13 +34,13 @@ function RecordPanel() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <span className="block text-sm font-semibold uppercase tracking-widest text-teal">
-              Land record · Demo data
+              Land record
             </span>
             <h3 className="mt-2 text-xl font-semibold tracking-tight text-navy">Plot 42, Survey 118/3</h3>
             <p className="mt-1 text-sm text-slate-600">Ownership transfer · 1,200 sq m</p>
           </div>
           <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-1 text-sm font-medium text-slate-500">
-            Sample
+            Example
           </span>
         </div>
         <span className="mt-4 inline-flex items-center gap-1.5 rounded-md bg-success-bg px-2.5 py-1 text-sm font-semibold text-success">
@@ -88,7 +74,7 @@ function RecordPanel() {
   );
 }
 
-const BUILT_WITH = ["Node.js", "PostgreSQL", "React", "Web Crypto API", "RSA-2048 · SHA-256", "Prisma"];
+const BUILT_WITH = ["Node.js", "PostgreSQL", "React", "Web Crypto API", "Prisma"];
 
 const PROBLEMS: [string, string, string][] = [
   [
@@ -130,25 +116,25 @@ const SECURITY: { title: string; description: string; how: string; icon: typeof 
   {
     title: "Verified digital identity",
     description: "Each participant receives a role-bound digital certificate.",
-    how: "2048-bit RSA keys generated in your browser · CA-issued certificate",
+    how: "A digital key pair generated in your browser · CA-issued certificate",
     icon: UserCheck,
   },
   {
     title: "Signed transactions",
     description: "Each approval can be traced to a verified identity and exact request.",
-    how: "RSASSA-PKCS1-v1_5 signatures · single-use nonces",
+    how: "Digitally signed, one-time-use approval requests",
     icon: KeyRound,
   },
   {
-    title: "SHA-256 integrity",
+    title: "Document integrity",
     description: "Uploaded documents are fingerprinted, so a one-character change is visible.",
-    how: "Document hash recomputed and compared to the recorded value",
+    how: "Document fingerprint recomputed and compared to what was recorded",
     icon: FileText,
   },
   {
     title: "Tamper-evident audit chain",
     description: "Every workflow event is linked to the history that came before it.",
-    how: "Each log entry includes the hash of the previous one",
+    how: "Each log entry is linked to the one before it, so nothing can be altered unnoticed",
     icon: Lock,
   },
 ];
@@ -177,7 +163,7 @@ export function HomePage() {
           <Reveal>
             <span className="mb-6 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm font-semibold text-navy">
               <span className="h-1.5 w-1.5 rounded-full bg-teal" aria-hidden="true" />
-              Open prototype · PKI-based land records
+              PKI-based land records
             </span>
             <h1 className={`${H1} max-w-xl`}>Land records you can verify, not just trust.</h1>
             <p className="mt-5 max-w-lg text-base text-slate-600">
@@ -206,7 +192,7 @@ export function HomePage() {
             <div className="mx-auto max-w-md">
               <RecordPanel />
               <p className="mt-3 text-center text-sm text-slate-500">
-                Illustrative sample. Real results appear after you sign in.
+                Illustrative example. Real results appear after you sign in.
               </p>
             </div>
           </Reveal>
@@ -359,13 +345,13 @@ export function HomePage() {
           <div className="flex flex-col items-start gap-8 rounded-2xl bg-navy p-8 text-white sm:p-14 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <span className="block text-sm font-bold uppercase tracking-[0.11em] text-teal/70">
-                Interactive prototype
+                See it in action
               </span>
               <h2 className="mt-4 text-[clamp(28px,3.5vw,38px)] font-semibold leading-tight tracking-[-0.035em] text-white">
                 See the workflow end to end
               </h2>
               <p className="mt-2 max-w-md text-sm text-slate-300">
-                Create a demo identity, submit a record and see how each signature builds trust.
+                Create an account, submit a record, and see how each signature builds trust.
               </p>
             </div>
             <div className="flex shrink-0 flex-wrap gap-3">

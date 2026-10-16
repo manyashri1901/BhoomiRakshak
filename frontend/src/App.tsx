@@ -6,6 +6,7 @@ import { useAuth } from "./context/AuthContext";
 import { roleHomePath } from "./lib/roleHome";
 import { HomePage } from "./pages/HomePage";
 import { HowItWorksPage } from "./pages/HowItWorksPage";
+import { AboutPage } from "./pages/AboutPage";
 import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
 import { LandownerDashboard } from "./pages/LandownerDashboard";
@@ -48,6 +49,7 @@ export default function App() {
               not a per-identifier route. */}
           <Route path="/certificates" element={<CertificateLookup />} />
           <Route path="/verify" element={<VerifyPage />} />
+          <Route path="/how-it-works" element={<HowItWorksPage />} />
 
           <Route element={<RoleRoute allowed={["LANDOWNER"]} />}>
             <Route path="/landowner" element={<LandownerDashboard />} />
@@ -64,7 +66,7 @@ export default function App() {
         </Route>
 
         <Route path="/" element={<RootRoute />} />
-        <Route path="/how-it-works" element={<HowItWorksPage />} />
+        <Route path="/about" element={<AboutPage />} />
         <Route path="*" element={<UnknownRouteRedirect />} />
       </Route>
     </Routes>

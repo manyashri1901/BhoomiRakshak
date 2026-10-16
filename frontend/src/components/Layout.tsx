@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
+  BookOpen,
   ChevronDown,
   Database,
   FileBadge2,
@@ -30,19 +31,12 @@ const COMMON_NAV: SidebarNavItem[] = [
   { to: "/land-records", label: "Registry", icon: Database },
   { to: "/certificates", label: "Certificates", icon: FileBadge2 },
   { to: "/verify", label: "Verify", icon: SearchCheck },
+  { to: "/how-it-works", label: "How it works", icon: BookOpen },
 ];
 
 const PUBLIC_NAV = [
   { to: "/", label: "Home", end: true },
-  { to: "/how-it-works", label: "How it works", end: false },
-  { to: "/verify", label: "Verify a record", end: false },
-];
-
-const PUBLIC_FOOTER_LINKS = [
-  { to: "/", label: "Home" },
-  { to: "/how-it-works", label: "How it works" },
-  { to: "/verify", label: "Verify" },
-  { to: "/login", label: "Login" },
+  { to: "/about", label: "About", end: false },
 ];
 
 function Logo() {
@@ -220,20 +214,11 @@ function PublicNav() {
 function PublicFooter() {
   return (
     <footer className="border-t border-slate-200 bg-white py-8">
-      <div className="mx-auto flex max-w-300 flex-col items-center gap-3 px-4 text-center sm:px-6">
-        <div className="text-sm font-semibold text-slate-900">BhoomiRakshak</div>
-        <p className="max-w-md text-xs text-slate-500">
-          PKI-based secure land record and ownership management — every transaction signed,
-          every record independently verifiable.
-        </p>
-        <nav className="flex flex-wrap items-center justify-center gap-x-5 gap-y-1">
-          {PUBLIC_FOOTER_LINKS.map(({ to, label }) => (
-            <Link key={to} to={to} className="text-xs font-medium text-slate-600 hover:text-slate-900">
-              {label}
-            </Link>
-          ))}
-        </nav>
-        <p className="text-xs text-slate-400">Demo prototype</p>
+      <div className="mx-auto flex max-w-300 flex-wrap items-center justify-center gap-x-2 gap-y-1 px-4 text-center text-sm text-slate-600 sm:px-6">
+        <span>BhoomiRakshak - a PKI-based land record security project by Manya Shrivastava</span>
+        <Link to="/about" className="font-medium text-navy underline">
+          About
+        </Link>
       </div>
     </footer>
   );

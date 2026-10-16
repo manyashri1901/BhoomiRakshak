@@ -6,12 +6,11 @@ import {
   getCertificateBySerial,
   getSignedCRL,
   searchCertificates,
-  type CAInfo,
   type CertificateSearchResult,
 } from "../api/certificates";
 import {
   verifyCertificateClientSide,
-  type CertificateEnvelope,
+  type CAInfo,
   type VerifyResult,
 } from "../lib/certificateVerify";
 import { Card } from "../components/Card";
@@ -32,7 +31,7 @@ function CAFingerprintNote({ caInfo }: { caInfo: CAInfo | null }) {
     <Card>
       <div className="flex items-center gap-2">
         <ShieldCheck className="h-4.5 w-4.5 text-teal" aria-hidden="true" />
-        <h2 className="text-sm font-semibold text-slate-900">Root CA public key</h2>
+        <h2 className="text-sm font-semibold text-slate-900">Root CA fingerprint</h2>
       </div>
       {!caInfo && <p className="mt-2 text-sm text-slate-500">Loading…</p>}
       {caInfo && (
@@ -41,14 +40,14 @@ function CAFingerprintNote({ caInfo }: { caInfo: CAInfo | null }) {
             <span className="break-all font-mono text-xs text-slate-600" title={caInfo.fingerprint}>
               {caInfo.fingerprint}
             </span>
-            <CopyButton value={caInfo.fingerprint} label="Copy CA public key fingerprint" />
+            <CopyButton value={caInfo.fingerprint} label="Copy root CA fingerprint" />
           </div>
           <p className="mt-2 text-sm text-slate-500">
-            Every check below verifies against this exact key, fetched from this same server. That
-            is a convenience for this prototype, not a complete trust story — in a production
-            deployment the CA's public key (or this fingerprint) would be pinned into the client
-            application or OS trust store out-of-band, not fetched live from the server it's meant
-            to be checking.
+            Every check below verifies against this exact root certificate, fetched from this same
+            server. That is a convenience for this build, not a complete trust story — in a
+            production deployment the root certificate (or this fingerprint) would be pinned into
+            the client application or OS trust store out-of-band, not fetched live from the server
+            it's meant to be checking.
           </p>
         </>
       )}
@@ -148,7 +147,6 @@ export function CertificateLookup() {
 
   const [caInfo, setCaInfo] = useState<CAInfo | null>(null);
   const [serialInput, setSerialInput] = useState("");
-  const [certificate, setCertificate] = useState<CertificateEnvelope | null>(null);
   const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -160,20 +158,18 @@ export function CertificateLookup() {
   async function runLookup(serial: string) {
     setLoading(true);
     setError(null);
-    setCertificate(null);
     setVerifyResult(null);
     try {
-      const [cert, ca, crl] = await Promise.all([
+      const [envelope, ca, crl] = await Promise.all([
         getCertificateBySerial(serial),
         caInfo ? Promise.resolve(caInfo) : getCAInfo(),
         getSignedCRL(),
       ]);
       if (!caInfo) setCaInfo(ca);
-      setCertificate(cert);
       // Every verdict shown below is computed HERE, in the browser, from
       // the raw signed data just fetched — never from anything the server
       // itself might claim about validity.
-      const result = await verifyCertificateClientSide(cert, ca.publicKey, crl);
+      const result = await verifyCertificateClientSide(envelope, ca, crl);
       setVerifyResult(result);
     } catch (err) {
       setError(
@@ -201,7 +197,7 @@ export function CertificateLookup() {
     <div className="flex flex-col gap-6">
       <PageHeader
         title="Certificate Lookup"
-        subtitle="Every check below is verified in your browser against the CA's public key and a signed revocation list — not a status computed by the server."
+        subtitle="Every check below is verified in your browser against the root and issuing CA certificates and a signed revocation list — not a status computed by the server."
       />
 
       <CAFingerprintNote caInfo={caInfo} />
@@ -209,17 +205,17 @@ export function CertificateLookup() {
       <Card>
         <h2 className="text-lg font-semibold text-slate-900">Look up by serial</h2>
         <p className="mt-1 text-sm text-slate-600">
-          Enter the exact certificate serial (its own id) to verify it independently.
+          Enter the exact certificate serial number to verify it independently.
         </p>
         <form onSubmit={handleSubmit} className="mt-4 flex flex-wrap items-end gap-3">
           <label className="flex min-w-64 flex-1 flex-col gap-1.5">
-            <span className="text-sm font-medium text-slate-700">Certificate serial / ID</span>
+            <span className="text-sm font-medium text-slate-700">Certificate serial number</span>
             <input
               type="text"
               required
               value={serialInput}
               onChange={(e) => setSerialInput(e.target.value)}
-              placeholder="e.g. cm0abc123…"
+              placeholder="e.g. 7f3a9c2e1b6d85041234567890abcdef"
               className={`${fieldInputClasses} font-mono`}
             />
           </label>
@@ -237,18 +233,15 @@ export function CertificateLookup() {
 
       {loading && <LoadingState label="Verifying certificate…" />}
       {error && <ErrorState label={error} />}
-      {!loading && !error && !certificate && (
+      {!loading && !error && !verifyResult && (
         <EmptyState label="Enter a certificate serial above to verify it." />
       )}
 
-      {certificate && verifyResult && (
+      {verifyResult && (
         <Card>
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <h2 className="text-xl font-semibold text-slate-900">{certificate.name}</h2>
-              <p className="mt-1 text-xs uppercase tracking-wide text-slate-500">
-                {ROLE_LABELS[certificate.role as keyof typeof ROLE_LABELS] ?? certificate.role}
-              </p>
+              <h2 className="text-xl font-semibold text-slate-900">{verifyResult.subject}</h2>
             </div>
             <ValidBadge
               valid={verifyResult.valid}
@@ -268,23 +261,17 @@ export function CertificateLookup() {
 
           <dl className="mt-4 grid grid-cols-1 gap-4 border-t border-slate-200 pt-4 text-sm sm:grid-cols-2">
             <div>
-              <dt className="text-slate-500">Issuer</dt>
-              <dd className="text-slate-900">{certificate.issuer}</dd>
-            </div>
-            <div>
-              <dt className="text-slate-500">Serial</dt>
+              <dt className="text-slate-500">Serial number</dt>
               <dd className="flex items-center gap-1.5 font-mono text-xs text-slate-900">
-                {certificate.serial}
-                <CopyButton value={certificate.serial} label="Copy serial" />
+                {verifyResult.serialNumber}
+                <CopyButton value={verifyResult.serialNumber} label="Copy serial number" />
               </dd>
             </div>
-            <div className="sm:col-span-2">
-              <dt className="text-slate-500">Public key</dt>
-              <dd className="mt-1 flex items-start gap-1.5">
-                <pre className="max-h-40 flex-1 overflow-y-auto whitespace-pre-wrap break-all rounded-lg bg-slate-50 p-3 font-mono text-xs text-slate-900">
-                  {certificate.publicKey}
-                </pre>
-                <CopyButton value={certificate.publicKey} label="Copy public key" />
+            <div>
+              <dt className="text-slate-500">Fingerprint (SHA-256 of the certificate)</dt>
+              <dd className="flex items-center gap-1.5 font-mono text-xs text-slate-900">
+                {verifyResult.fingerprint}
+                <CopyButton value={verifyResult.fingerprint} label="Copy fingerprint" />
               </dd>
             </div>
           </dl>

@@ -1,5 +1,5 @@
 import { api } from "./client";
-import type { CertificateEnvelope, SignedCRL } from "../lib/certificateVerify";
+import type { CertificateEnvelope, CAInfo, SignedCRL } from "../lib/certificateVerify";
 import type { Certificate, RevokedCertificateSummary, Role } from "../types";
 
 export function getCertificateByUserId(userId: string) {
@@ -16,13 +16,7 @@ export function revokeCertificate(certificateId: string, reason: string) {
     .then((r) => r.data);
 }
 
-// --- Certificate Lookup rework: client-side-verifiable endpoints --------
-
-export interface CAInfo {
-  issuer: string;
-  publicKey: string;
-  fingerprint: string;
-}
+// --- Certificate Lookup rework: client-side-verifiable X.509 endpoints --
 
 export function getCAInfo() {
   return api.get<CAInfo>("/certificates/ca").then((r) => r.data);
@@ -32,10 +26,12 @@ export function getSignedCRL() {
   return api.get<SignedCRL>("/certificates/crl/signed").then((r) => r.data);
 }
 
-/** Exact lookup by certificate serial (the certificate's own id) — any
- * authenticated user. Returns the raw signed envelope only; the caller
- * verifies it client-side (lib/certificateVerify.ts), never trusting a
- * server-computed verdict because there isn't one in this response. */
+/** Exact lookup by the certificate's real X.509 serial number — any
+ * authenticated user. Returns the raw certificate PEM (plus the issuing
+ * CA's own PEM, so the browser can verify the chain in one round trip);
+ * the caller verifies it client-side (lib/certificateVerify.ts), never
+ * trusting a server-computed verdict because there isn't one in this
+ * response. */
 export function getCertificateBySerial(serial: string) {
   return api.get<CertificateEnvelope>(`/certificates/serial/${serial}`).then((r) => r.data);
 }

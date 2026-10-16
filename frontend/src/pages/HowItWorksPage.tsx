@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, ClipboardCheck, RotateCcw, Stamp, UserCheck } from "lucide-react";
+import { ChevronLeft, ChevronRight, ClipboardCheck, Stamp, UserCheck } from "lucide-react";
 import { Reveal } from "../components/ui/Reveal";
 import { prefersReducedMotion } from "../components/ui/motion";
-import { Banner } from "../components/ui/Banner";
 import { Button } from "../components/ui/Button";
-import { CopyButton } from "../components/ui/CopyButton";
 
 const AUTO_ADVANCE_MS = 6000;
 
@@ -13,42 +11,35 @@ const STEPS = [
     id: "landowner",
     label: "Landowner",
     icon: UserCheck,
-    does: "Uploads a supporting document and signs the transaction with their own private key.",
-    signs: "A canonical payload: transaction type, land record, and the document's SHA-256 hash.",
-    checks: "Their own certificate is valid (not expired or revoked) before the signature is accepted.",
+    does: "Uploads a supporting document and signs the request with their own digital key.",
+    checks: "Their identity certificate is valid and not revoked.",
   },
   {
     id: "village-officer",
     label: "Village Officer",
     icon: ClipboardCheck,
-    does: "Reviews the landowner's document and signature, then co-signs to approve it.",
-    signs: "The same payload, now chained to the landowner's signature.",
-    checks: "The landowner's signature verifies, their certificate is still valid, and the document hash still matches the file on disk.",
+    does: "Reviews the details and documents, then adds their own signature.",
+    checks: "The landowner's identity certificate is valid and not revoked.",
   },
   {
     id: "registrar",
     label: "Registrar",
     icon: Stamp,
-    does: "Verifies the full two-signature chain, then finalizes the record.",
-    signs: "The complete payload, now chained to both prior signatures.",
-    checks: "Both prior signatures and certificates, end to end, before the land record is updated.",
+    does: "Reviews the full history and signs the final record.",
+    checks: "Both prior identity certificates are valid and not revoked.",
   },
 ];
 
 function StepIllustration({ stepIndex }: { stepIndex: number }) {
   const step = STEPS[stepIndex];
   const Icon = step.icon;
-  // A short, fixed, illustrative hex string per step — not a real hash of
-  // anything, just a visual cue that something cryptographic changes hands
-  // at each stage.
-  const sample = ["7f3a9c2e1b6d8504", "c58b1f4d9a73e602", "2d9f6b1e4a7c83f0"][stepIndex];
 
   return (
-    <div key={step.id} className="animate-fade-in-up flex flex-col items-center gap-3 rounded-xl border border-slate-200 bg-white p-6">
+    <div key={step.id} className="animate-fade-in-up flex flex-col items-center justify-center gap-3 rounded-xl border border-slate-200 bg-white p-6">
       <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-navy/10 text-navy">
         <Icon className="h-6 w-6" aria-hidden="true" />
       </div>
-      <div className="font-mono text-xs text-teal">sig:{sample}…</div>
+      <span className="text-sm font-medium text-slate-700">{step.label}</span>
     </div>
   );
 }
@@ -130,10 +121,6 @@ function Stepper() {
               <dd className="mt-1 text-slate-600">{active.does}</dd>
             </div>
             <div>
-              <dt className="font-semibold text-slate-900">What they sign</dt>
-              <dd className="mt-1 text-slate-600">{active.signs}</dd>
-            </div>
-            <div>
               <dt className="font-semibold text-slate-900">What's checked</dt>
               <dd className="mt-1 text-slate-600">{active.checks}</dd>
             </div>
@@ -155,86 +142,10 @@ function Stepper() {
   );
 }
 
-const SAMPLE_TEXT = "Plot 42, Survey 118/3, Owner: A. Kumar, Area: 1200 sq m";
-
-async function sha256Hex(input: string): Promise<string> {
-  const bytes = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function TamperDemo() {
-  const [text, setText] = useState(SAMPLE_TEXT);
-  const [originalHash, setOriginalHash] = useState<string | null>(null);
-  const [currentHash, setCurrentHash] = useState<string | null>(null);
-
-  // Computed once, from the sample text as it was when this page loaded —
-  // "the fingerprint of the original saved on load" — independent of
-  // anything the user types afterward.
-  useEffect(() => {
-    sha256Hex(SAMPLE_TEXT).then(setOriginalHash);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    sha256Hex(text).then((hash) => {
-      if (!cancelled) setCurrentHash(hash);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [text]);
-
-  const matches = originalHash !== null && currentHash !== null && currentHash === originalHash;
-
-  return (
-    <div className="rounded-xl border border-slate-200 bg-white p-5">
-      <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Demo — sample text, not a real record</p>
-      <label className="mt-3 flex flex-col gap-1.5">
-        <span className="text-sm font-medium text-slate-700">Record text</span>
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          rows={3}
-          className="rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-sm text-slate-900 outline-none transition-colors focus:border-teal focus:ring-2 focus:ring-teal/30"
-        />
-      </label>
-
-      <div className="mt-3 flex flex-col gap-2 text-sm">
-        <div className="flex items-center gap-2">
-          <span className="w-32 shrink-0 text-slate-500">Original hash</span>
-          <span className="truncate font-mono text-xs text-slate-700">{originalHash ?? "computing…"}</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="w-32 shrink-0 text-slate-500">Current hash</span>
-          <span className="truncate font-mono text-xs text-slate-700">{currentHash ?? "computing…"}</span>
-          {currentHash && <CopyButton value={currentHash} label="Copy current hash" />}
-        </div>
-      </div>
-
-      <div className="mt-3">
-        {originalHash === null || currentHash === null ? null : matches ? (
-          <Banner variant="success">Matches the original.</Banner>
-        ) : (
-          <Banner variant="danger">Hash mismatch — tampering detected.</Banner>
-        )}
-      </div>
-
-      <div className="mt-3">
-        <Button variant="secondary" onClick={() => setText(SAMPLE_TEXT)} icon={<RotateCcw className="h-4 w-4" aria-hidden="true" />}>
-          Reset
-        </Button>
-      </div>
-    </div>
-  );
-}
-
 const PKI_STRIP = [
-  { title: "Authentication", description: "Proves who signed, via their CA-issued certificate." },
-  { title: "Integrity", description: "Proves the data hasn't changed since the moment it was signed." },
-  { title: "Non-repudiation", description: "A valid signature can't be plausibly denied by its signer." },
+  { title: "Authentication", description: "Proves who took the action, via their digital identity." },
+  { title: "Integrity", description: "Proves the record hasn't changed since the moment it was signed." },
+  { title: "Non-repudiation", description: "A signed action can't be plausibly denied by its signer." },
 ];
 
 export function HowItWorksPage() {
@@ -244,7 +155,7 @@ export function HowItWorksPage() {
         <div>
           <h1 className="text-[28px] font-semibold text-slate-900 sm:text-[32px]">How it works</h1>
           <p className="mt-2 max-w-2xl text-sm text-slate-600">
-            One transaction, three signatures — a real ordered approval chain, not a formality.
+            One request, three signatures — a real ordered approval chain, not a formality.
           </p>
         </div>
       </Reveal>
@@ -254,19 +165,6 @@ export function HowItWorksPage() {
       </Reveal>
 
       <Reveal delay={120}>
-        <div>
-          <h2 className="text-lg font-semibold text-slate-900">Try it: tamper detection</h2>
-          <p className="mt-1 text-sm text-slate-600">
-            Edit the text below and watch the hash change — this is the same SHA-256 check the app
-            runs on real documents.
-          </p>
-          <div className="mt-4">
-            <TamperDemo />
-          </div>
-        </div>
-      </Reveal>
-
-      <Reveal delay={180}>
         <div>
           <h2 className="text-lg font-semibold text-slate-900">What PKI gives you</h2>
           <div className="mt-4 grid grid-cols-1 divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white sm:grid-cols-3 sm:divide-x sm:divide-y-0">
