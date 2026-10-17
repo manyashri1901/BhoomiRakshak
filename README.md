@@ -104,6 +104,26 @@ deduplicated list (client-side key custody, operational limits, etc.) is in
 - **Forgetting your password loses your key, permanently** — there is no
   password reset or key backup/escrow by design.
 
+## Trust anchor
+
+The Certificate Lookup page shows a root CA fingerprint it fetched from
+this same server — convenient, but not by itself a trust story (see
+`lib/ca.ts` and the Limitations above). To actually confirm it, compute
+the fingerprint independently, out-of-band, from the root certificate
+file itself, and compare the two by eye:
+
+```bash
+openssl x509 -in keys/root-ca-cert.pem -noout -fingerprint -sha256
+```
+
+(openssl prints colon-separated hex, uppercase; the lookup page prints
+the same bytes as plain lowercase hex — ignore punctuation and case,
+compare only the hex digits themselves.) If they don't match, stop trusting the
+server's answer — something between you and it (or the server itself)
+isn't what it claims to be. In a real deployment this comparison value
+would be pinned into the client application or OS trust store ahead of
+time, not fetched live from the thing it's meant to be checking.
+
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — client-side signing,

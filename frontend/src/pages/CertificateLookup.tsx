@@ -5,12 +5,14 @@ import {
   getCAInfo,
   getCertificateBySerial,
   getSignedCRL,
+  getMyCertificateSerial,
   searchCertificates,
   type CertificateSearchResult,
 } from "../api/certificates";
 import {
   verifyCertificateClientSide,
   type CAInfo,
+  type SignedCRL,
   type VerifyResult,
 } from "../lib/certificateVerify";
 import { Card } from "../components/Card";
@@ -50,6 +52,30 @@ function CAFingerprintNote({ caInfo }: { caInfo: CAInfo | null }) {
             it's meant to be checking.
           </p>
         </>
+      )}
+    </Card>
+  );
+}
+
+function CRLInfoNote({ crlInfo }: { crlInfo: SignedCRL | null }) {
+  return (
+    <Card>
+      <div className="flex items-center gap-2">
+        <ShieldCheck className="h-4.5 w-4.5 text-teal" aria-hidden="true" />
+        <h2 className="text-sm font-semibold text-slate-900">Revocation list status</h2>
+      </div>
+      {!crlInfo && <p className="mt-2 text-sm text-slate-500">Loading…</p>}
+      {crlInfo && (
+        <dl className="mt-2 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+          <div>
+            <dt className="text-slate-500">Signed</dt>
+            <dd className="text-slate-900">{new Date(crlInfo.thisUpdate).toLocaleString()}</dd>
+          </div>
+          <div>
+            <dt className="text-slate-500">Valid until (next update)</dt>
+            <dd className="text-slate-900">{new Date(crlInfo.nextUpdate).toLocaleString()}</dd>
+          </div>
+        </dl>
       )}
     </Card>
   );
@@ -146,13 +172,16 @@ export function CertificateLookup() {
   const canSearchByName = user ? SEARCHABLE_ROLES.includes(user.role) : false;
 
   const [caInfo, setCaInfo] = useState<CAInfo | null>(null);
+  const [crlInfo, setCrlInfo] = useState<SignedCRL | null>(null);
   const [serialInput, setSerialInput] = useState("");
   const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [myCertLoading, setMyCertLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     getCAInfo().then(setCaInfo);
+    getSignedCRL().then(setCrlInfo);
   }, []);
 
   async function runLookup(serial: string) {
@@ -166,6 +195,7 @@ export function CertificateLookup() {
         getSignedCRL(),
       ]);
       if (!caInfo) setCaInfo(ca);
+      setCrlInfo(crl);
       // Every verdict shown below is computed HERE, in the browser, from
       // the raw signed data just fetched — never from anything the server
       // itself might claim about validity.
@@ -188,6 +218,24 @@ export function CertificateLookup() {
     runLookup(serialInput.trim());
   }
 
+  async function handleMyCertificate() {
+    setMyCertLoading(true);
+    setError(null);
+    try {
+      const serial = await getMyCertificateSerial();
+      setSerialInput(serial);
+      await runLookup(serial);
+    } catch (err) {
+      setError(
+        axios.isAxiosError(err)
+          ? (err.response?.data?.error ?? "Failed to load your certificate")
+          : "Failed to load your certificate",
+      );
+    } finally {
+      setMyCertLoading(false);
+    }
+  }
+
   function handlePicked(serial: string) {
     setSerialInput(serial);
     runLookup(serial);
@@ -201,23 +249,28 @@ export function CertificateLookup() {
       />
 
       <CAFingerprintNote caInfo={caInfo} />
+      <CRLInfoNote crlInfo={crlInfo} />
 
       <Card>
         <h2 className="text-lg font-semibold text-slate-900">Look up by serial</h2>
         <p className="mt-1 text-sm text-slate-600">
-          Enter the exact certificate serial number to verify it independently.
+          Enter the exact certificate serial number to verify it independently
+          {user && ", or use your own below"}.
         </p>
         <form onSubmit={handleSubmit} className="mt-4 flex flex-wrap items-end gap-3">
           <label className="flex min-w-64 flex-1 flex-col gap-1.5">
             <span className="text-sm font-medium text-slate-700">Certificate serial number</span>
-            <input
-              type="text"
-              required
-              value={serialInput}
-              onChange={(e) => setSerialInput(e.target.value)}
-              placeholder="e.g. 7f3a9c2e1b6d85041234567890abcdef"
-              className={`${fieldInputClasses} font-mono`}
-            />
+            <div className="flex items-center gap-1.5">
+              <input
+                type="text"
+                required
+                value={serialInput}
+                onChange={(e) => setSerialInput(e.target.value)}
+                placeholder="e.g. 7f3a9c2e1b6d85041234567890abcdef"
+                className={`${fieldInputClasses} font-mono`}
+              />
+              {serialInput.trim() && <CopyButton value={serialInput.trim()} label="Copy serial number" />}
+            </div>
           </label>
           <button
             type="submit"
@@ -226,6 +279,16 @@ export function CertificateLookup() {
           >
             {loading ? "Verifying…" : "Verify"}
           </button>
+          {user && (
+            <button
+              type="button"
+              onClick={handleMyCertificate}
+              disabled={myCertLoading || loading}
+              className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {myCertLoading ? "Loading…" : "My certificate"}
+            </button>
+          )}
         </form>
       </Card>
 
