@@ -9,12 +9,17 @@ interface UserPickerProps {
   placeholder?: string;
   selected: UserSummary | null;
   onSelect: (user: UserSummary | null) => void;
+  /** Dropped from results — e.g. so a transfer's "new owner" picker can
+   * never offer the seller themselves. */
+  excludeUserId?: string;
 }
 
 // Small debounced-search combobox. Used both by the Registrar's "select
 // owner" (LANDOWNER-filtered) and the Landowner's TRANSFER "select new
-// owner" pickers, so it isn't tied to either.
-export function UserPicker({ role, placeholder, selected, onSelect }: UserPickerProps) {
+// owner" pickers, so it isn't tied to either. Matches by name (prefix) or
+// by a full, exact email — same search the server itself accepts
+// (routes/users.ts).
+export function UserPicker({ role, placeholder, selected, onSelect, excludeUserId }: UserPickerProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<UserSummary[]>([]);
   const [open, setOpen] = useState(false);
@@ -23,10 +28,10 @@ export function UserPicker({ role, placeholder, selected, onSelect }: UserPicker
   useEffect(() => {
     if (!open) return;
     const timeout = setTimeout(() => {
-      searchUsers({ role, q: query || undefined }).then(setResults);
+      searchUsers({ role, q: query || undefined, excludeUserId }).then(setResults);
     }, 200);
     return () => clearTimeout(timeout);
-  }, [query, role, open]);
+  }, [query, role, open, excludeUserId]);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {

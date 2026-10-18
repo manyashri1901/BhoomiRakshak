@@ -3,6 +3,7 @@ import { Lock } from "lucide-react";
 import { Banner } from "./ui/Banner";
 import { Button } from "./ui/Button";
 import { Field, fieldInputClasses } from "./ui/Field";
+import { getErrorMessage } from "../lib/errorMessage";
 
 interface PasswordPromptProps {
   open: boolean;
@@ -42,7 +43,7 @@ export function PasswordPrompt({
       await onConfirm(password);
       setPassword("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Signing failed");
+      setError(getErrorMessage(err, "Signing failed"));
     } finally {
       setSubmitting(false);
     }

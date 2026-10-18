@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
-import axios from "axios";
 import { Search, ShieldCheck } from "lucide-react";
+import { getErrorMessage } from "../lib/errorMessage";
 import {
   getCAInfo,
   getCertificateBySerial,
@@ -202,11 +202,7 @@ export function CertificateLookup() {
       const result = await verifyCertificateClientSide(envelope, ca, crl);
       setVerifyResult(result);
     } catch (err) {
-      setError(
-        axios.isAxiosError(err)
-          ? (err.response?.data?.error ?? "Failed to load certificate")
-          : "Failed to load certificate",
-      );
+      setError(getErrorMessage(err, "Failed to load certificate"));
     } finally {
       setLoading(false);
     }
@@ -226,11 +222,7 @@ export function CertificateLookup() {
       setSerialInput(serial);
       await runLookup(serial);
     } catch (err) {
-      setError(
-        axios.isAxiosError(err)
-          ? (err.response?.data?.error ?? "Failed to load your certificate")
-          : "Failed to load your certificate",
-      );
+      setError(getErrorMessage(err, "Failed to load your certificate"));
     } finally {
       setMyCertLoading(false);
     }

@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import axios from "axios";
 import { useAuth } from "../context/AuthContext";
 import { ROLE_LABELS } from "../lib/roleHome";
+import { getErrorMessage } from "../lib/errorMessage";
 import { Field, fieldInputClasses } from "../components/ui/Field";
 import { Button } from "../components/ui/Button";
 import { Banner } from "../components/ui/Banner";
@@ -30,7 +31,7 @@ export function RegisterPage() {
       navigate("/login", { state: { justRegistered: true } });
     } catch (err) {
       if (axios.isAxiosError(err) && err.response) {
-        setError(err.response.data?.error ?? "Registration failed");
+        setError(getErrorMessage(err, "Registration failed"));
       } else {
         setError("Could not reach the server. Please try again.");
       }

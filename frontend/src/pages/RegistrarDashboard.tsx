@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import axios from "axios";
 import { ClipboardList, Plus } from "lucide-react";
 import { createLandRecord } from "../api/landRecords";
+import { getErrorMessage } from "../lib/errorMessage";
 import {
   listPendingRegistrar,
   prepareRegistrarReview,
@@ -35,11 +35,7 @@ export function RegistrarDashboard() {
     listPendingRegistrar()
       .then(setTransactions)
       .catch((err) => {
-        setLoadError(
-          axios.isAxiosError(err)
-            ? (err.response?.data?.error ?? "Failed to load review queue")
-            : "Failed to load review queue",
-        );
+        setLoadError(getErrorMessage(err, "Failed to load review queue"));
       });
   }, []);
 
@@ -86,11 +82,7 @@ export function RegistrarDashboard() {
       setAreaUnit("HECTARE");
       setOwner(null);
     } catch (err) {
-      setFormError(
-        axios.isAxiosError(err)
-          ? (err.response?.data?.error ?? "Failed to create land record")
-          : "Failed to create land record",
-      );
+      setFormError(getErrorMessage(err, "Failed to create land record"));
     } finally {
       setSubmitting(false);
     }

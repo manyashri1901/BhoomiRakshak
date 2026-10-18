@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import axios from "axios";
 import { listLandRecords } from "../api/landRecords";
 import { LandRecordsTable } from "../components/LandRecordsTable";
 import { TransferOwnershipModal } from "../components/TransferOwnershipModal";
@@ -7,6 +6,7 @@ import { EmptyState, ErrorState } from "../components/States";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Banner } from "../components/ui/Banner";
 import { useAuth } from "../context/AuthContext";
+import { getErrorMessage } from "../lib/errorMessage";
 import type { LandRecordListItem } from "../types";
 
 export function LandRecordsRegistry() {
@@ -20,7 +20,7 @@ export function LandRecordsRegistry() {
     listLandRecords()
       .then(setRecords)
       .catch((err) => {
-        setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? "Failed to load land records") : "Failed to load land records");
+        setError(getErrorMessage(err, "Failed to load land records"));
       });
   }
 

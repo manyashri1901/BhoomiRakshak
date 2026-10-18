@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import axios from "axios";
 import { useAuth } from "../context/AuthContext";
 import { roleHomePath } from "../lib/roleHome";
+import { getErrorMessage } from "../lib/errorMessage";
 import { Field, fieldInputClasses } from "../components/ui/Field";
 import { Button } from "../components/ui/Button";
 import { Banner } from "../components/ui/Banner";
@@ -31,7 +32,7 @@ export function LoginPage() {
       navigate(roleHomePath(user.role), { replace: true });
     } catch (err) {
       if (axios.isAxiosError(err) && err.response) {
-        setError(err.response.data?.error ?? "Login failed");
+        setError(getErrorMessage(err, "Login failed"));
       } else {
         setError("Could not reach the server. Please try again.");
       }

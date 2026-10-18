@@ -1,41 +1,57 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
-import axios from "axios";
-import { CheckCircle2, Clock, Landmark, Upload } from "lucide-react";
-import { listLandRecords, getLandRecordHistory } from "../api/landRecords";
-import { prepareCreateTransaction, submitCreateTransaction } from "../api/transactions";
+import { CheckCircle2, Clock, HeartHandshake, Landmark, Upload } from "lucide-react";
+import { listLandRecords } from "../api/landRecords";
+import { prepareCreateTransaction, submitCreateTransaction, getMyTransactions } from "../api/transactions";
 import { uploadDocument } from "../api/documents";
 import { signAndSubmit } from "../lib/signAndSubmit";
+import { getErrorMessage } from "../lib/errorMessage";
 import { useAuth } from "../context/AuthContext";
-import { formatAreaWithConversion } from "../lib/areaUnits";
 import { Card } from "../components/Card";
-import { LandRecordStatusBadge, TransactionStatusBadge } from "../components/StatusBadge";
+import { LandRecordsTable } from "../components/LandRecordsTable";
+import { TransactionStatusBadge } from "../components/StatusBadge";
 import { EmptyState, ErrorState, LoadingState } from "../components/States";
-import { UserPicker } from "../components/UserPicker";
 import { PasswordPrompt } from "../components/PasswordPrompt";
+import { TransferOwnershipModal } from "../components/TransferOwnershipModal";
+import { ClaimHeirModal } from "../components/ClaimHeirModal";
 import { PageHeader } from "../components/ui/PageHeader";
 import { StatCard } from "../components/ui/StatCard";
 import { Button } from "../components/ui/Button";
 import { Banner } from "../components/ui/Banner";
 import { Field, fieldInputClasses } from "../components/ui/Field";
-import { SkeletonTableRows } from "../components/ui/Skeleton";
-import type { HistoryTransaction, LandRecordListItem, TransactionType, UserSummary } from "../types";
+import type { LandRecordListItem, MyTransaction, TransactionType } from "../types";
 
-interface OwnedTransaction extends HistoryTransaction {
-  surveyNumber: string;
+// TRANSFER is deliberately excluded — ownership transfers now go through
+// the per-record "Transfer ownership" button (LandRecordsTable /
+// TransferOwnershipModal), not this generic multi-type form. REGISTRATION
+// and UPDATE never change hands (toOwnerId is always the caller
+// themselves), so they're unaffected by that move.
+const TYPES: TransactionType[] = ["REGISTRATION", "UPDATE"];
+
+// A buyer/heir on a still-pending (or rejected) incoming transfer or
+// succession claim doesn't own the land record yet, so
+// GET /land-records/:id/history 404s for them — the detail page simply
+// isn't viewable until ownership actually moves. Mirrors exactly when
+// routes/transactions.ts's registrar-review/submit updates currentOwnerId:
+// only on an APPROVED TRANSFER or SUCCESSION (REGISTRATION/UPDATE never
+// change hands — toOwnerId is already the caller themselves).
+function currentlyOwnedByUser(t: MyTransaction, userId: string): boolean {
+  const changesOwnerOnApproval = t.type === "TRANSFER" || t.type === "SUCCESSION";
+  const effectiveOwnerId =
+    changesOwnerOnApproval && t.status === "APPROVED" ? t.toOwnerId : (t.fromOwnerId ?? t.toOwnerId);
+  return effectiveOwnerId === userId;
 }
 
-const TYPES: TransactionType[] = ["REGISTRATION", "TRANSFER", "UPDATE"];
-
 export function LandownerDashboard() {
-  const { wrappedKey } = useAuth();
+  const { user, wrappedKey } = useAuth();
   const [records, setRecords] = useState<LandRecordListItem[] | null>(null);
-  const [transactions, setTransactions] = useState<OwnedTransaction[] | null>(null);
+  const [transactions, setTransactions] = useState<MyTransaction[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [transferTarget, setTransferTarget] = useState<LandRecordListItem | null>(null);
+  const [claimHeirOpen, setClaimHeirOpen] = useState(false);
 
   const [landRecordId, setLandRecordId] = useState("");
   const [type, setType] = useState<TransactionType>("REGISTRATION");
-  const [toOwner, setToOwner] = useState<UserSummary | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -47,7 +63,6 @@ export function LandownerDashboard() {
   const [pendingInput, setPendingInput] = useState<{
     type: TransactionType;
     landRecordId: string;
-    toOwnerId?: string;
     documentPath: string;
     documentHash: string;
   } | null>(null);
@@ -62,23 +77,13 @@ export function LandownerDashboard() {
 
   async function loadData() {
     try {
-      const recordList = await listLandRecords();
+      const [recordList, myTransactions] = await Promise.all([listLandRecords(), getMyTransactions()]);
       if (!mountedRef.current) return;
       setRecords(recordList);
-      const histories = await Promise.all(recordList.map((r) => getLandRecordHistory(r.id)));
-      if (!mountedRef.current) return;
-      const merged: OwnedTransaction[] = histories.flatMap((h) =>
-        h.transactions.map((t) => ({ ...t, surveyNumber: h.landRecord.surveyNumber })),
-      );
-      merged.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-      setTransactions(merged);
+      setTransactions(myTransactions);
     } catch (err) {
       if (!mountedRef.current) return;
-      setLoadError(
-        axios.isAxiosError(err)
-          ? (err.response?.data?.error ?? "Failed to load your land records")
-          : "Failed to load your land records",
-      );
+      setLoadError(getErrorMessage(err, "Failed to load your land records"));
     }
   }
 
@@ -106,10 +111,6 @@ export function LandownerDashboard() {
       setFormError("Select a land record.");
       return;
     }
-    if (type === "TRANSFER" && !toOwner) {
-      setFormError("Select the new owner for a transfer.");
-      return;
-    }
     if (!file) {
       setFormError("Attach a supporting document.");
       return;
@@ -121,17 +122,12 @@ export function LandownerDashboard() {
       setPendingInput({
         type,
         landRecordId,
-        toOwnerId: type === "TRANSFER" ? toOwner!.id : undefined,
         documentPath: upload.documentPath,
         documentHash: upload.documentHash,
       });
       setSigningOpen(true);
     } catch (err) {
-      setFormError(
-        axios.isAxiosError(err)
-          ? (err.response?.data?.error ?? "Failed to upload document")
-          : "Failed to upload document",
-      );
+      setFormError(getErrorMessage(err, "Failed to upload document"));
     } finally {
       setSubmitting(false);
     }
@@ -152,7 +148,6 @@ export function LandownerDashboard() {
     setSuccessMessage("Transaction created and sent for Village Officer review.");
     setLandRecordId("");
     setType("REGISTRATION");
-    setToOwner(null);
     setFile(null);
     setPendingInput(null);
     await loadData();
@@ -160,7 +155,20 @@ export function LandownerDashboard() {
 
   return (
     <div className="flex flex-col gap-6">
-      <PageHeader title="My Land" subtitle="Your registered land parcels and their transaction activity." />
+      <PageHeader
+        title="My Land"
+        subtitle="Your registered land parcels and their transaction activity."
+        action={
+          <Button
+            type="button"
+            variant="secondary"
+            icon={<HeartHandshake className="h-4 w-4" aria-hidden="true" />}
+            onClick={() => setClaimHeirOpen(true)}
+          >
+            Claim as legal heir
+          </Button>
+        }
+      />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         <StatCard label="Land records" value={stats.total} icon={Landmark} tone="navy" />
@@ -175,42 +183,15 @@ export function LandownerDashboard() {
       )}
 
       {!loadError && (records === null || records.length > 0) && (
-        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-          <table className="w-full min-w-160 border-collapse text-left text-sm">
-            <thead className="sticky top-16 z-10">
-              <tr className="border-b border-slate-200 bg-slate-50 text-xs font-medium uppercase tracking-wide text-slate-600">
-                <th className="px-4 py-3">Survey No.</th>
-                <th className="px-4 py-3">Location</th>
-                <th className="px-4 py-3">Area</th>
-                <th className="px-4 py-3">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {records === null && <SkeletonTableRows rows={3} columns={4} />}
-              {records?.map((r) => (
-                <tr key={r.id} className="border-b border-slate-100 last:border-0 hover:bg-slate-50">
-                  <td className="px-4 py-3">
-                    <Link to={`/land-records/${r.id}`} className="font-medium text-navy underline">
-                      {r.surveyNumber}
-                    </Link>
-                  </td>
-                  <td className="px-4 py-3 text-slate-700">{r.location}</td>
-                  <td className="px-4 py-3 text-slate-700">{formatAreaWithConversion(r.area, r.areaUnit)}</td>
-                  <td className="px-4 py-3">
-                    <LandRecordStatusBadge status={r.status} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <LandRecordsTable records={records} currentUserId={user?.userId} onTransfer={setTransferTarget} />
       )}
 
       {records && records.length > 0 && (
         <Card>
           <h2 className="text-lg font-semibold text-slate-900">Create Transaction</h2>
           <p className="mt-1 text-sm text-slate-600">
-            Registers, transfers, or updates a land record you own. Sent for Village Officer review first.
+            Registers or updates a land record you own. Sent for Village Officer review first. To transfer
+            ownership, use the "Transfer ownership" button on the record itself, below.
           </p>
 
           <form onSubmit={handleSubmit} className="mt-4 flex flex-col gap-4">
@@ -233,10 +214,7 @@ export function LandownerDashboard() {
               <Field label="Transaction type">
                 <select
                   value={type}
-                  onChange={(e) => {
-                    setType(e.target.value as TransactionType);
-                    setToOwner(null);
-                  }}
+                  onChange={(e) => setType(e.target.value as TransactionType)}
                   className={fieldInputClasses}
                 >
                   {TYPES.map((t) => (
@@ -247,12 +225,6 @@ export function LandownerDashboard() {
                 </select>
               </Field>
             </div>
-
-            {type === "TRANSFER" && (
-              <Field label="New owner">
-                <UserPicker role="LANDOWNER" selected={toOwner} onSelect={setToOwner} placeholder="Search landowners by name…" />
-              </Field>
-            )}
 
             <Field label="Supporting document">
               <input
@@ -274,6 +246,9 @@ export function LandownerDashboard() {
 
       <div>
         <h2 className="text-lg font-semibold text-slate-900">Your transactions</h2>
+        <p className="mt-1 text-sm text-slate-600">
+          Includes transfers where you're the buyer, even before you own the record yet.
+        </p>
         {transactions === null && !loadError && (
           <div className="mt-3">
             <LoadingState label="Loading transactions…" />
@@ -286,19 +261,39 @@ export function LandownerDashboard() {
         )}
         {transactions !== null && transactions.length > 0 && (
           <div className="mt-3 flex flex-col gap-2">
-            {transactions.map((t) => (
-              <Link
-                key={t.id}
-                to={`/land-records/${t.landRecordId}`}
-                className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm hover:bg-slate-50"
-              >
-                <span>
-                  <span className="font-medium text-slate-900">{t.type}</span>
-                  <span className="ml-2 text-slate-500">Survey No. {t.surveyNumber}</span>
-                </span>
-                <TransactionStatusBadge status={t.status} />
-              </Link>
-            ))}
+            {transactions.map((t) => {
+              const direction =
+                t.type === "TRANSFER"
+                  ? t.isBuyer
+                    ? `Buying from ${t.fromOwnerName}`
+                    : `Selling to ${t.toOwnerName}`
+                  : t.type === "SUCCESSION"
+                    ? t.isBuyer
+                      ? `Claiming from ${t.fromOwnerName} (deceased)`
+                      : null
+                    : null;
+              const rowContent = (
+                <>
+                  <span>
+                    <span className="font-medium text-slate-900">{t.type}</span>
+                    <span className="ml-2 text-slate-500">Survey No. {t.surveyNumber}</span>
+                    {direction && <span className="ml-2 text-slate-500">— {direction}</span>}
+                  </span>
+                  <TransactionStatusBadge status={t.status} />
+                </>
+              );
+              const className =
+                "flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm";
+              return user && currentlyOwnedByUser(t, user.userId) ? (
+                <Link key={t.id} to={`/land-records/${t.landRecordId}`} className={`${className} hover:bg-slate-50`}>
+                  {rowContent}
+                </Link>
+              ) : (
+                <div key={t.id} className={className}>
+                  {rowContent}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -311,6 +306,30 @@ export function LandownerDashboard() {
         onConfirm={handleSignAndSubmit}
         onCancel={() => setSigningOpen(false)}
       />
+
+      {transferTarget && (
+        <TransferOwnershipModal
+          landRecordId={transferTarget.id}
+          surveyNumber={transferTarget.surveyNumber}
+          onClose={() => setTransferTarget(null)}
+          onTransferred={() => {
+            setTransferTarget(null);
+            setSuccessMessage("Transfer created and sent for Village Officer review.");
+            loadData();
+          }}
+        />
+      )}
+
+      {claimHeirOpen && (
+        <ClaimHeirModal
+          onClose={() => setClaimHeirOpen(false)}
+          onClaimed={() => {
+            setClaimHeirOpen(false);
+            setSuccessMessage("Succession claim submitted and sent for Village Officer review.");
+            loadData();
+          }}
+        />
+      )}
     </div>
   );
 }
