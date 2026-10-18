@@ -128,8 +128,7 @@ the client application or OS trust store ahead of time, not fetched live from
 the thing it's meant to be checking.
 
 ## Documentation
-
-- [docs/SCREENSHOTS.md](docs/SCREENSHOTS.md) — screenshot walkthrough
+* [`docs/SCREENSHOTS.md`](docs/SCREENSHOTS.md) — screenshot walkthrough
 - [docs/architecture.md](docs/architecture.md) — client-side signing, technical design, project structure
 - [docs/deployment.md](docs/deployment.md) — deployment guide (Neon, Render, Vercel)
 - [docs/configuration.md](docs/configuration.md) — environment variable reference
