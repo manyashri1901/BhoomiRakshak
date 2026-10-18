@@ -7,9 +7,10 @@ export interface AuthUser {
 }
 
 export type LandRecordStatus = "ACTIVE" | "PENDING" | "DISPUTED" | "TRANSFERRED";
-export type TransactionType = "REGISTRATION" | "TRANSFER" | "UPDATE";
+export type TransactionType = "REGISTRATION" | "TRANSFER" | "UPDATE" | "SUCCESSION";
 export type TransactionStatus = "PENDING_VO" | "PENDING_REGISTRAR" | "APPROVED" | "REJECTED";
 export type AreaUnit = "HECTARE" | "ACRE";
+export type UserStatus = "ACTIVE" | "DECEASED";
 
 export interface LandRecord {
   id: string;
@@ -20,6 +21,7 @@ export interface LandRecord {
   status: LandRecordStatus;
   createdAt: string;
   currentOwnerId: string;
+  currentOwnerName?: string;
 }
 
 export interface LandRecordListItem extends LandRecord {
@@ -64,6 +66,8 @@ export interface TransactionWithChain {
   toOwnerId: string;
   documentPath: string;
   documentHash: string;
+  secondaryDocumentPath: string | null;
+  secondaryDocumentHash: string | null;
   status: TransactionStatus;
   rejectReason: string | null;
   createdAt: string;
@@ -108,8 +112,17 @@ export interface HistorySignature {
   role: Role;
   signedAt: string;
   valid: boolean;
+  // certificateValid is "valid AT SIGNING TIME" — see routes/transactions.ts's
+  // GET /:id/verify for the full rationale. currentlyRevoked distinguishes
+  // "signed while valid, certificate later revoked" (e.g. a deceased
+  // SUCCESSION owner's earlier signatures) from a signature that was
+  // never good. signingTimeTrusted false means no matching audit log
+  // entry was found — certificateValid is then always false regardless.
   certificateValid: boolean;
   certificateReason: string | null;
+  currentlyRevoked: boolean;
+  currentlyRevokedReason: string | null;
+  signingTimeTrusted: boolean;
 }
 
 export interface DocumentIntegrityResult {
@@ -122,9 +135,13 @@ export interface HistoryTransaction {
   type: TransactionType;
   landRecordId: string;
   fromOwnerId: string | null;
+  fromOwnerName: string | null;
   toOwnerId: string;
+  toOwnerName: string;
   documentPath: string;
   documentHash: string;
+  secondaryDocumentPath: string | null;
+  secondaryDocumentHash: string | null;
   status: TransactionStatus;
   rejectReason: string | null;
   createdAt: string;
@@ -135,6 +152,27 @@ export interface HistoryTransaction {
 export interface LandRecordHistory {
   landRecord: LandRecord;
   transactions: HistoryTransaction[];
+}
+
+// GET /api/transactions/mine — every transaction where the caller is the
+// buyer or the seller, regardless of who currently owns the land record
+// (backs transfer-status visibility on both the buyer's and seller's
+// dashboards; see routes/transactions.ts).
+export interface MyTransaction {
+  id: string;
+  type: TransactionType;
+  landRecordId: string;
+  surveyNumber: string;
+  location: string;
+  fromOwnerId: string | null;
+  fromOwnerName: string | null;
+  toOwnerId: string;
+  toOwnerName: string;
+  status: TransactionStatus;
+  rejectReason: string | null;
+  createdAt: string;
+  isBuyer: boolean;
+  isSeller: boolean;
 }
 
 export interface Certificate {
@@ -174,6 +212,9 @@ export interface TransactionVerifyResult {
     role: Role;
     certificateValid: boolean;
     certificateReason: string | null;
+    currentlyRevoked: boolean;
+    currentlyRevokedReason: string | null;
+    signingTimeTrusted: boolean;
   }[];
   signatureValidity: {
     actorName: string;

@@ -25,10 +25,10 @@ import * as path from "node:path";
 import { prisma } from "../lib/prisma.ts";
 import { requireAuth, requireRole, requireCertifiedRole } from "../middleware/auth.ts";
 import { verifySignature, verifySignatureOverCanonicalString } from "../lib/signing.ts";
-import { verifyCertificate, verifyCertificateForUser, publicKeyPemFromCertificatePem } from "../lib/ca.ts";
+import { verifyCertificate, verifyCertificateForUser, publicKeyPemFromCertificatePem, revokeCertificateTx } from "../lib/ca.ts";
 import { createSigningNonce, consumeSigningNonce, SigningNonceError } from "../lib/signingNonce.ts";
 import { canonicalStringify } from "../lib/canonicalize.ts";
-import { appendAuditEntryTx } from "../lib/audit.ts";
+import { appendAuditEntryTx, findSignatureAcceptedAt } from "../lib/audit.ts";
 import { anchorAuditChainBestEffort } from "../lib/timestamp.ts";
 import type { TransactionType } from "../generated/prisma/enums.ts";
 import type { TransactionModel, LandRecordModel, SignatureModel } from "../generated/prisma/models.ts";
@@ -58,7 +58,7 @@ interface ActorSummary {
 const router = express.Router();
 
 const UPLOAD_DIR = path.resolve(process.cwd(), "uploads");
-const VALID_TYPES: TransactionType[] = ["REGISTRATION", "TRANSFER", "UPDATE"];
+const VALID_TYPES: TransactionType[] = ["REGISTRATION", "TRANSFER", "UPDATE", "SUCCESSION"];
 
 // Checked before accepting ANY signature from `userId` — at creation and at
 // every review stage, for both the actor signing right now and every prior
@@ -107,6 +107,12 @@ export interface TransactionPayload {
   toOwnerId: string;
   documentPath: string;
   documentHash: string;
+  // SUCCESSION's optional heir/legal document — null for every other type
+  // and whenever a SUCCESSION claim omits it. Included in the signed
+  // payload for the same reason documentHash is: so it can't be swapped
+  // out after the heir signs without invalidating their signature.
+  secondaryDocumentPath: string | null;
+  secondaryDocumentHash: string | null;
   actorId: string;
   certificateFingerprint: string;
   createdAt: string;
@@ -138,6 +144,8 @@ export interface ReviewPayload {
   toOwnerId: string;
   documentPath: string;
   documentHash: string;
+  secondaryDocumentPath: string | null;
+  secondaryDocumentHash: string | null;
   priorSignatures: string[];
   actorId: string;
   role: string;
@@ -177,7 +185,18 @@ export type TransactionWithChain = TransactionModel & {
 };
 
 function rebuildCreationPayload(
-  transaction: Pick<TransactionModel, "type" | "landRecordId" | "fromOwnerId" | "toOwnerId" | "documentPath" | "documentHash" | "createdAt">,
+  transaction: Pick<
+    TransactionModel,
+    | "type"
+    | "landRecordId"
+    | "fromOwnerId"
+    | "toOwnerId"
+    | "documentPath"
+    | "documentHash"
+    | "secondaryDocumentPath"
+    | "secondaryDocumentHash"
+    | "createdAt"
+  >,
   landownerActorId: string,
   certificateFingerprint: string,
 ) {
@@ -188,6 +207,8 @@ function rebuildCreationPayload(
     toOwnerId: transaction.toOwnerId,
     documentPath: transaction.documentPath,
     documentHash: transaction.documentHash,
+    secondaryDocumentPath: transaction.secondaryDocumentPath,
+    secondaryDocumentHash: transaction.secondaryDocumentHash,
     actorId: landownerActorId,
     certificateFingerprint,
     createdAt: transaction.createdAt.toISOString(),
@@ -208,7 +229,16 @@ export interface SignatureChainResult {
 // type-satisfy) an unused `landRecord` relation just to call this.
 type ChainableTransaction = Pick<
   TransactionModel,
-  "id" | "type" | "landRecordId" | "fromOwnerId" | "toOwnerId" | "documentPath" | "documentHash" | "createdAt"
+  | "id"
+  | "type"
+  | "landRecordId"
+  | "fromOwnerId"
+  | "toOwnerId"
+  | "documentPath"
+  | "documentHash"
+  | "secondaryDocumentPath"
+  | "secondaryDocumentHash"
+  | "createdAt"
 > & {
   signatures: (SignatureModel & { actor: ActorSummary })[];
 };
@@ -237,6 +267,8 @@ export function verifySignatureChain(transaction: ChainableTransaction): Signatu
               toOwnerId: transaction.toOwnerId,
               documentPath: transaction.documentPath,
               documentHash: transaction.documentHash,
+              secondaryDocumentPath: transaction.secondaryDocumentPath,
+              secondaryDocumentHash: transaction.secondaryDocumentHash,
               actorId: signature.actorId,
               certificateFingerprint: fingerprint,
               createdAt: transaction.createdAt.toISOString(),
@@ -249,6 +281,8 @@ export function verifySignatureChain(transaction: ChainableTransaction): Signatu
               toOwnerId: transaction.toOwnerId,
               documentPath: transaction.documentPath,
               documentHash: transaction.documentHash,
+              secondaryDocumentPath: transaction.secondaryDocumentPath,
+              secondaryDocumentHash: transaction.secondaryDocumentHash,
               priorSignatures: transaction.signatures
                 .slice(0, index)
                 .map((s) => s.signatureValue),
@@ -284,11 +318,8 @@ export interface DocumentIntegrityResult {
 // other half of tamper-evidence alongside verifySignatureChain: a DB-level
 // tamper of documentHash (see routes/dev.ts) breaks this check directly,
 // on top of cascading into every signature that embeds documentHash.
-export async function checkDocumentIntegrity(transaction: {
-  documentPath: string;
-  documentHash: string;
-}): Promise<DocumentIntegrityResult> {
-  const resolvedDocumentPath = path.resolve(process.cwd(), transaction.documentPath);
+async function checkOneDocument(documentPath: string, documentHash: string): Promise<DocumentIntegrityResult> {
+  const resolvedDocumentPath = path.resolve(process.cwd(), documentPath);
   if (
     resolvedDocumentPath !== UPLOAD_DIR &&
     !resolvedDocumentPath.startsWith(UPLOAD_DIR + path.sep)
@@ -299,10 +330,30 @@ export async function checkDocumentIntegrity(transaction: {
   try {
     const fileBuffer = await fs.promises.readFile(resolvedDocumentPath);
     const actualHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
-    return { match: actualHash === transaction.documentHash };
+    return { match: actualHash === documentHash };
   } catch {
     return { match: false, error: "No file found at documentPath" };
   }
+}
+
+// Also checks the optional secondary document (SUCCESSION's heir/legal
+// document) when present, so a tamper of either file is caught — not just
+// the main document (the death certificate, for SUCCESSION).
+export async function checkDocumentIntegrity(transaction: {
+  documentPath: string;
+  documentHash: string;
+  secondaryDocumentPath?: string | null;
+  secondaryDocumentHash?: string | null;
+}): Promise<DocumentIntegrityResult> {
+  const primary = await checkOneDocument(transaction.documentPath, transaction.documentHash);
+  if (!primary.match) return primary;
+  if (!transaction.secondaryDocumentPath || !transaction.secondaryDocumentHash) return primary;
+
+  const secondary = await checkOneDocument(transaction.secondaryDocumentPath, transaction.secondaryDocumentHash);
+  if (!secondary.match) {
+    return { match: false, error: secondary.error ?? "Secondary document hash does not match what was recorded." };
+  }
+  return { match: true };
 }
 
 function handleSigningNonceError(err: unknown, res: express.Response): boolean {
@@ -325,7 +376,45 @@ interface PreparedCreatePayload {
   fromOwnerId: string | null;
   documentPath: string;
   documentHash: string;
+  secondaryDocumentPath: string | null;
+  secondaryDocumentHash: string | null;
   type: TransactionType;
+}
+
+async function validateOptionalSecondaryDocument(
+  secondaryDocumentPath: unknown,
+  secondaryDocumentHash: unknown,
+  res: express.Response,
+): Promise<{ ok: true; path: string | null; hash: string | null } | { ok: false }> {
+  if (secondaryDocumentPath === undefined && secondaryDocumentHash === undefined) {
+    return { ok: true, path: null, hash: null };
+  }
+  if (typeof secondaryDocumentPath !== "string" || !secondaryDocumentPath.trim()) {
+    res.status(400).json({ error: "secondaryDocumentPath, if provided, must be a non-empty string" });
+    return { ok: false };
+  }
+  if (typeof secondaryDocumentHash !== "string" || !/^[0-9a-f]{64}$/i.test(secondaryDocumentHash)) {
+    res.status(400).json({ error: "secondaryDocumentHash, if provided, must be a 64-character hex SHA-256 hash" });
+    return { ok: false };
+  }
+  const resolved = path.resolve(process.cwd(), secondaryDocumentPath);
+  if (resolved !== UPLOAD_DIR && !resolved.startsWith(UPLOAD_DIR + path.sep)) {
+    res.status(400).json({ error: "secondaryDocumentPath must reference a file under uploads/" });
+    return { ok: false };
+  }
+  let fileBuffer: Buffer;
+  try {
+    fileBuffer = await fs.promises.readFile(resolved);
+  } catch {
+    res.status(400).json({ error: "No file found at secondaryDocumentPath" });
+    return { ok: false };
+  }
+  const actualHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
+  if (actualHash !== secondaryDocumentHash) {
+    res.status(400).json({ error: "Secondary document hash mismatch — possible tampering or corrupted upload" });
+    return { ok: false };
+  }
+  return { ok: true, path: secondaryDocumentPath, hash: secondaryDocumentHash };
 }
 
 // Shared by prepare and submit so the two can never validate differently —
@@ -335,7 +424,8 @@ async function validateAndBuildCreatePayload(
   req: express.Request,
   res: express.Response,
 ): Promise<PreparedCreatePayload | null> {
-  const { type, landRecordId, toOwnerId, documentPath, documentHash } = req.body ?? {};
+  const { type, landRecordId, toOwnerId, documentPath, documentHash, secondaryDocumentPath, secondaryDocumentHash } =
+    req.body ?? {};
 
   if (typeof type !== "string" || !VALID_TYPES.includes(type as TransactionType)) {
     res.status(400).json({ error: `type must be one of ${VALID_TYPES.join(", ")}` });
@@ -385,13 +475,21 @@ async function validateAndBuildCreatePayload(
 
   const actorId = req.user!.userId;
 
-  if (landRecord.currentOwnerId !== actorId) {
+  // SUCCESSION is the one type where the actor (the heir) is deliberately
+  // NOT the current owner — every other type still requires it.
+  if (type !== "SUCCESSION" && landRecord.currentOwnerId !== actorId) {
     res.status(403).json({ error: "You are not the current owner of this land record" });
+    return null;
+  }
+  if (type === "SUCCESSION" && landRecord.currentOwnerId === actorId) {
+    res.status(400).json({ error: "You already own this land record — a succession claim is for records you don't own" });
     return null;
   }
 
   // Double-sale guard — see migration add_pending_transaction_unique_index
-  // for the DB-level backstop behind this application-level check.
+  // for the DB-level backstop behind this application-level check. Applies
+  // identically to a succession claim: a record already PENDING (for any
+  // reason) cannot also be claimed.
   if (landRecord.status !== "ACTIVE") {
     res.status(409).json({
       error: `landRecord is not ACTIVE (current status: ${landRecord.status}) — it may already have a transaction pending review`,
@@ -414,17 +512,35 @@ async function validateAndBuildCreatePayload(
       res.status(400).json({ error: "toOwnerId is required for TRANSFER transactions" });
       return null;
     }
+    if (toOwnerId === actorId) {
+      res.status(400).json({ error: "You cannot transfer a land record to yourself" });
+      return null;
+    }
     const newOwner = await prisma.user.findUnique({ where: { id: toOwnerId } });
     if (!newOwner) {
       res.status(400).json({ error: "toOwnerId does not reference an existing user" });
       return null;
     }
+    if (newOwner.role !== "LANDOWNER") {
+      res.status(400).json({ error: "The new owner must be a registered Landowner" });
+      return null;
+    }
     fromOwnerId = actorId;
     resolvedToOwnerId = toOwnerId;
+  } else if (type === "SUCCESSION") {
+    // The heir IS the signer (actorId) — requireCertifiedRole("LANDOWNER")
+    // on the route already guarantees they're a registered Landowner, so
+    // there's no separate "must be a Landowner" lookup needed here the way
+    // TRANSFER's toOwnerId (a different person) requires one.
+    fromOwnerId = landRecord.currentOwnerId;
+    resolvedToOwnerId = actorId;
   } else {
     fromOwnerId = null;
     resolvedToOwnerId = actorId;
   }
+
+  const secondaryDoc = await validateOptionalSecondaryDocument(secondaryDocumentPath, secondaryDocumentHash, res);
+  if (!secondaryDoc.ok) return null;
 
   const certProblem = await certificateProblem(actorId);
   if (certProblem) {
@@ -440,6 +556,8 @@ async function validateAndBuildCreatePayload(
     toOwnerId: resolvedToOwnerId,
     documentPath,
     documentHash,
+    secondaryDocumentPath: secondaryDoc.path,
+    secondaryDocumentHash: secondaryDoc.hash,
     actorId,
     certificateFingerprint,
     createdAt: new Date().toISOString(),
@@ -453,6 +571,8 @@ async function validateAndBuildCreatePayload(
     fromOwnerId,
     documentPath,
     documentHash,
+    secondaryDocumentPath: secondaryDoc.path,
+    secondaryDocumentHash: secondaryDoc.hash,
     type: type as TransactionType,
   };
 }
@@ -527,6 +647,24 @@ router.post("/submit", requireAuth, requireCertifiedRole("LANDOWNER"), async (re
         );
       }
 
+      // Re-checked here too, not just at prepare time — same reasoning as
+      // every other precondition in this block: time has passed since
+      // prepare, and the frozen payload's toOwnerId could in principle no
+      // longer satisfy these rules even though it couldn't have been
+      // forged (consumeSigningNonce already ties it to this exact actor).
+      if (parsed.type === "TRANSFER") {
+        if (parsed.toOwnerId === actorId) {
+          throw new SigningNonceError("You cannot transfer a land record to yourself");
+        }
+        const newOwner = await db.user.findUnique({ where: { id: parsed.toOwnerId } });
+        if (!newOwner || newOwner.role !== "LANDOWNER") {
+          throw new SigningNonceError("The new owner must be a registered Landowner");
+        }
+      }
+      if (parsed.type === "SUCCESSION" && landRecord.currentOwnerId === actorId) {
+        throw new SigningNonceError("You already own this land record — a succession claim is for records you don't own");
+      }
+
       const actorKeyPem = actor.certificate ? publicKeyPemFromCertificatePem(actor.certificate.certificatePem) : null;
       if (!actorKeyPem) {
         throw new SigningNonceError("No certificate on file for this account.");
@@ -551,6 +689,8 @@ router.post("/submit", requireAuth, requireCertifiedRole("LANDOWNER"), async (re
           toOwnerId: parsed.toOwnerId,
           documentPath: parsed.documentPath,
           documentHash: parsed.documentHash,
+          secondaryDocumentPath: parsed.secondaryDocumentPath,
+          secondaryDocumentHash: parsed.secondaryDocumentHash,
           status: "PENDING_VO",
           createdAt,
         },
@@ -594,6 +734,45 @@ router.post("/submit", requireAuth, requireCertifiedRole("LANDOWNER"), async (re
     }
     throw err;
   }
+});
+
+// GET /api/transactions/mine — every transaction where the caller is
+// either the seller (fromOwnerId) or the buyer (toOwnerId), regardless of
+// who currently owns the land record. Needed because GET /land-records is
+// scoped to CURRENT ownership only: without this, a buyer has no way to
+// see an incoming transfer before it's approved (they don't own the
+// record yet), and a seller loses visibility of an outgoing transfer the
+// moment it's approved (they no longer own the record either).
+router.get("/mine", requireAuth, async (req, res) => {
+  const userId = req.user!.userId;
+  const transactions = await prisma.transaction.findMany({
+    where: { OR: [{ fromOwnerId: userId }, { toOwnerId: userId }] },
+    include: {
+      landRecord: { select: { surveyNumber: true, location: true } },
+      fromOwner: { select: { name: true } },
+      toOwner: { select: { name: true } },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  res.json(
+    transactions.map((t) => ({
+      id: t.id,
+      type: t.type,
+      landRecordId: t.landRecordId,
+      surveyNumber: t.landRecord.surveyNumber,
+      location: t.landRecord.location,
+      fromOwnerId: t.fromOwnerId,
+      fromOwnerName: t.fromOwner?.name ?? null,
+      toOwnerId: t.toOwnerId,
+      toOwnerName: t.toOwner.name,
+      status: t.status,
+      rejectReason: t.rejectReason,
+      createdAt: t.createdAt,
+      isBuyer: t.toOwnerId === userId,
+      isSeller: t.fromOwnerId === userId,
+    })),
+  );
 });
 
 // GET /api/transactions/pending-vo
@@ -788,6 +967,8 @@ router.post("/:id/vo-review/prepare", requireAuth, requireCertifiedRole("VILLAGE
     toOwnerId: transaction.toOwnerId,
     documentPath: transaction.documentPath,
     documentHash: transaction.documentHash,
+    secondaryDocumentPath: transaction.secondaryDocumentPath,
+    secondaryDocumentHash: transaction.secondaryDocumentHash,
     priorSignatures: [landownerSignature.signatureValue],
     actorId: voId,
     role: "VILLAGE_OFFICER",
@@ -962,6 +1143,8 @@ async function checkPriorSignaturesValidForRegistrar(
         toOwnerId: transaction.toOwnerId,
         documentPath: transaction.documentPath,
         documentHash: transaction.documentHash,
+        secondaryDocumentPath: transaction.secondaryDocumentPath,
+        secondaryDocumentHash: transaction.secondaryDocumentHash,
         priorSignatures: [landownerSignature.signatureValue],
         actorId: voSignature.actorId,
         role: "VILLAGE_OFFICER",
@@ -1110,6 +1293,8 @@ router.post("/:id/registrar-review/prepare", requireAuth, requireCertifiedRole("
     toOwnerId: transaction.toOwnerId,
     documentPath: transaction.documentPath,
     documentHash: transaction.documentHash,
+    secondaryDocumentPath: transaction.secondaryDocumentPath,
+    secondaryDocumentHash: transaction.secondaryDocumentHash,
     priorSignatures: [landownerSignature.signatureValue, voSignature.signatureValue],
     actorId: registrarId,
     role: "REGISTRAR",
@@ -1226,7 +1411,7 @@ router.post("/:id/registrar-review/submit", requireAuth, requireCertifiedRole("R
       });
 
       const landRecordUpdate: { status: "ACTIVE"; currentOwnerId?: string } = { status: "ACTIVE" };
-      if (transaction.type === "REGISTRATION" || transaction.type === "TRANSFER") {
+      if (transaction.type === "REGISTRATION" || transaction.type === "TRANSFER" || transaction.type === "SUCCESSION") {
         landRecordUpdate.currentOwnerId = transaction.toOwnerId;
       }
       const landRecord = await db.landRecord.update({
@@ -1241,6 +1426,55 @@ router.post("/:id/registrar-review/submit", requireAuth, requireCertifiedRole("R
         entityId: transaction.id,
         details: { decision: "APPROVE" },
       });
+
+      // SUCCESSION's whole point: everything below happens atomically with
+      // the ownership change above — the deceased's account is retired and
+      // every OTHER transaction of theirs still in flight is cancelled, so
+      // the system can never be left with a "deceased" owner who still
+      // looks fully active everywhere except this one record.
+      if (transaction.type === "SUCCESSION" && transaction.fromOwnerId) {
+        const deceasedId = transaction.fromOwnerId;
+
+        const deceasedCert = await db.certificate.findUnique({ where: { subjectUserId: deceasedId } });
+        if (deceasedCert && !deceasedCert.revoked) {
+          await revokeCertificateTx(db, {
+            certificateId: deceasedCert.id,
+            revokedByUserId: registrarId,
+            reason: "Owner deceased",
+          });
+        }
+
+        await db.user.update({ where: { id: deceasedId }, data: { status: "DECEASED" } });
+        await appendAuditEntryTx(db, {
+          action: "USER_MARKED_DECEASED",
+          actorUserId: registrarId,
+          entityType: "USER",
+          entityId: deceasedId,
+          details: { succeededByUserId: transaction.toOwnerId, transactionId: transaction.id },
+        });
+
+        const otherPending = await db.transaction.findMany({
+          where: {
+            id: { not: transaction.id },
+            status: { in: ["PENDING_VO", "PENDING_REGISTRAR"] },
+            OR: [{ fromOwnerId: deceasedId }, { toOwnerId: deceasedId }],
+          },
+        });
+        for (const other of otherPending) {
+          await db.transaction.update({
+            where: { id: other.id },
+            data: { status: "REJECTED", rejectReason: "Cancelled — owner deceased" },
+          });
+          await db.landRecord.update({ where: { id: other.landRecordId }, data: { status: "ACTIVE" } });
+          await appendAuditEntryTx(db, {
+            action: "TRANSACTION_CANCELLED",
+            actorUserId: registrarId,
+            entityType: "TRANSACTION",
+            entityId: other.id,
+            details: { reason: "Owner deceased", deceasedUserId: deceasedId },
+          });
+        }
+      }
 
       return { txn, signature, landRecord };
     }, TRANSACTION_OPTIONS);
@@ -1277,20 +1511,51 @@ router.get("/:id/verify", requireAuth, async (req, res) => {
   // signerIdentity + signatureValidity share the same chain walk.
   const chain = verifySignatureChain(transaction);
 
+  // certificateValid below answers "was this signer's certificate valid AT
+  // THE MOMENT they signed" — not "is it valid right now" — so a
+  // certificate revoked later (e.g. the owner in a SUCCESSION claim,
+  // revoked on final approval) doesn't retroactively invalidate a
+  // signature that was genuine when it was made. The "as of" timestamp
+  // comes only from the hash-chained audit log (findSignatureAcceptedAt,
+  // lib/audit.ts) — never the Signature row's own signedAt column, which
+  // isn't independently tamper-evident the same way.
   const signerIdentity = await Promise.all(
     chain.map(async (link) => {
       const certificate = await prisma.certificate.findUnique({
         where: { subjectUserId: link.actorId },
       });
-      const result = certificate ? await verifyCertificate(certificate.id) : null;
+      if (!certificate) {
+        return {
+          actorId: link.actorId,
+          actorName: link.actorName,
+          role: link.role,
+          certificateValid: false,
+          certificateReason: "No certificate found for this user.",
+          currentlyRevoked: false,
+          currentlyRevokedReason: null,
+          signingTimeTrusted: false,
+        };
+      }
+
+      const acceptedAt = await findSignatureAcceptedAt(transaction.id, link.actorId, link.role);
+      const trusted = acceptedAt !== null;
+      const asOfResult = await verifyCertificate(certificate.id, acceptedAt ?? new Date());
+      const nowResult = await verifyCertificate(certificate.id);
+
       return {
         actorId: link.actorId,
         actorName: link.actorName,
         role: link.role,
-        certificateValid: result?.valid ?? false,
-        certificateReason: result
-          ? result.details.reason
-          : "No certificate found for this user.",
+        // Untrusted (no matching audit entry — e.g. a signature row
+        // inserted directly into the database, bypassing the API) is
+        // never reported as valid, regardless of what asOfResult says.
+        certificateValid: trusted && asOfResult.valid,
+        certificateReason: trusted
+          ? asOfResult.details.reason
+          : "No matching audit log entry for this signature — its timestamp cannot be trusted.",
+        currentlyRevoked: nowResult.details.revoked,
+        currentlyRevokedReason: nowResult.details.revokedReason,
+        signingTimeTrusted: trusted,
       };
     }),
   );

@@ -189,6 +189,17 @@ router.post("/login", loginRateLimiter, async (req, res) => {
     return;
   }
 
+  // Checked only after the password is confirmed correct — otherwise an
+  // unauthenticated prober could use this response to learn an account's
+  // deceased status from the email alone. Set only by an approved
+  // SUCCESSION transaction (routes/transactions.ts); there is no path back
+  // from DECEASED to ACTIVE.
+  if (user.status === "DECEASED") {
+    logAuthEvent("LOGIN_FAILURE", { userId: user.id, email: normalizedEmail, reason: "Account marked deceased" });
+    res.status(403).json({ error: "This account is no longer active." });
+    return;
+  }
+
   const token = jwt.sign({ userId: user.id, role: user.role }, JWT_SECRET, {
     expiresIn: "1h",
   });

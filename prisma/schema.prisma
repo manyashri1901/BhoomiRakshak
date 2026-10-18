@@ -28,6 +28,23 @@ enum TransactionType {
   REGISTRATION
   TRANSFER
   UPDATE
+  // Heir claims ownership of a record left by a deceased owner, reusing
+  // the same VO -> Registrar approval chain as every other type. See
+  // routes/transactions.ts's SUCCESSION-specific validation for how
+  // fromOwnerId (the deceased)/toOwnerId (the heir, also the signer)
+  // differ from TRANSFER's.
+  SUCCESSION
+}
+
+// ACTIVE -> DECEASED is one-way, set only on final Registrar approval of a
+// SUCCESSION transaction (routes/transactions.ts) — never set directly.
+// Login and requireCertifiedRole() both check this account's state: once
+// DECEASED, the account can neither log in (routes/auth.ts) nor sign
+// anything (its certificate is revoked in the same database transaction
+// that sets this field).
+enum UserStatus {
+  ACTIVE
+  DECEASED
 }
 
 enum TransactionStatus {
@@ -66,6 +83,10 @@ model User {
   wrappedPrivateKey String? @db.Text
   wrapSalt          String?
   wrapIv            String?
+
+  // See UserStatus above — ACTIVE for every account except one moved to
+  // DECEASED by an approved SUCCESSION transaction.
+  status UserStatus @default(ACTIVE)
 
   createdAt DateTime @default(now())
 
@@ -147,6 +168,12 @@ model Transaction {
   toOwner      User               @relation("TransactionToOwner", fields: [toOwnerId], references: [id], onDelete: Restrict)
   documentPath String
   documentHash String
+  // SUCCESSION only: an optional second document (e.g. a legal-heir /
+  // succession certificate) alongside the required death certificate,
+  // which is the transaction's main documentPath/documentHash above.
+  // Null for every other type and whenever a SUCCESSION claim omits it.
+  secondaryDocumentPath String?
+  secondaryDocumentHash String?
   status       TransactionStatus  @default(PENDING_VO)
   rejectReason String?
   createdAt    DateTime           @default(now())
