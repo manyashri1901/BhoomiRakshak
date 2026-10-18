@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import axios from "axios";
 import { Search } from "lucide-react";
 import { verifyTransaction } from "../api/transactions";
+import { getErrorMessage } from "../lib/errorMessage";
 import { Card } from "../components/Card";
 import { ValidBadge } from "../components/ValidBadge";
 import { ErrorState, LoadingState } from "../components/States";
@@ -41,8 +42,8 @@ export function VerifyPage() {
       setResult(data);
     } catch (err) {
       setError(
-        axios.isAxiosError(err)
-          ? (err.response?.data?.error ?? "Verification failed")
+        axios.isAxiosError(err) && err.response
+          ? getErrorMessage(err, "Verification failed")
           : "Could not reach the server. Please try again.",
       );
     } finally {
@@ -90,17 +91,40 @@ export function VerifyPage() {
               Each signer's certificate re-verified live against the CA's public key.
             </p>
             <ul className="mt-3 flex flex-col gap-2">
-              {result.signerIdentity.map((s, i) => (
-                <li key={i} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm">
-                  <span>
-                    {s.actorName}{" "}
-                    <span className="text-xs uppercase tracking-wide text-slate-500">
-                      {ROLE_LABELS[s.role] ?? s.role}
-                    </span>
-                  </span>
-                  <ValidBadge valid={s.certificateValid} label={s.certificateValid ? "Certificate Valid" : "Certificate Invalid"} />
-                </li>
-              ))}
+              {result.signerIdentity.map((s, i) => {
+                // Signed while their certificate was valid, but it's since
+                // been revoked (e.g. the owner in a SUCCESSION claim) —
+                // the signature itself is still genuine and should not be
+                // reported the same as one that was never good.
+                const signedWhileValidNowRevoked = s.certificateValid && s.currentlyRevoked;
+                return (
+                  <li key={i} className="flex flex-col gap-1 rounded-lg bg-slate-50 px-3 py-2 text-sm">
+                    <div className="flex items-center justify-between">
+                      <span>
+                        {s.actorName}{" "}
+                        <span className="text-xs uppercase tracking-wide text-slate-500">
+                          {ROLE_LABELS[s.role] ?? s.role}
+                        </span>
+                      </span>
+                      <ValidBadge
+                        valid={s.certificateValid}
+                        label={s.certificateValid ? "Certificate Valid" : "Certificate Invalid"}
+                      />
+                    </div>
+                    {!s.signingTimeTrusted && (
+                      <p className="text-xs font-medium text-red-600">
+                        No matching audit log entry for this signature — its timestamp cannot be trusted.
+                      </p>
+                    )}
+                    {signedWhileValidNowRevoked && (
+                      <p className="text-xs font-medium text-amber-700">
+                        Signed while certificate valid; later revoked
+                        {s.currentlyRevokedReason ? `: ${s.currentlyRevokedReason}` : "."}
+                      </p>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           </Card>
 

@@ -31,8 +31,9 @@ import { RSA_SIGNING_ALGORITHM, generateRsaKeyPairPem, importPrivateKeyPem } fro
 import * as x509 from "@peculiar/x509";
 import { prisma } from "./prisma.ts";
 import { canonicalStringify } from "./canonicalize.ts";
-import { appendAuditEntry } from "./audit.ts";
+import { appendAuditEntry, appendAuditEntryTx } from "./audit.ts";
 import type { Role } from "../generated/prisma/enums.ts";
+import type { Prisma } from "../generated/prisma/client.ts";
 
 // ---------------------------------------------------------------------------
 // 1. KEY / CERTIFICATE FILE LAYOUT
@@ -437,13 +438,26 @@ export interface VerifyCertificateResult {
   };
 }
 
-export async function verifyCertificateForUser(userId: string): Promise<VerifyCertificateResult | null> {
+export async function verifyCertificateForUser(userId: string, asOf?: Date): Promise<VerifyCertificateResult | null> {
   const certificate = await prisma.certificate.findUnique({ where: { subjectUserId: userId } });
   if (!certificate) return null;
-  return verifyCertificate(certificate.id);
+  return verifyCertificate(certificate.id, asOf);
 }
 
-export async function verifyCertificate(certificateId: string): Promise<VerifyCertificateResult> {
+/**
+ * Verifies a certificate as of `asOf` (default: now). Every LIVE gating
+ * call site (requireCertifiedRole, certificateProblem in
+ * routes/transactions.ts) relies on the default — "is this certificate
+ * usable right now" is exactly what should gate a new action. The two
+ * read-only history/verify endpoints (routes/transactions.ts's
+ * GET /:id/verify, routes/land-records.ts's GET /:id/history) instead pass
+ * the signature's own trusted signing time, so a certificate revoked
+ * AFTER a signature was made doesn't retroactively invalidate that
+ * signature — see findSignatureAcceptedAt() in lib/audit.ts for where that
+ * trusted time comes from (never the client, never even the Signature
+ * row's own signedAt column — see that function's own comment).
+ */
+export async function verifyCertificate(certificateId: string, asOf: Date = new Date()): Promise<VerifyCertificateResult> {
   const { issuingCert, rootCert } = await ensureIssuingCA();
 
   const cert = await prisma.certificate.findUnique({
@@ -468,14 +482,17 @@ export async function verifyCertificate(certificateId: string): Promise<VerifyCe
   const userSignatureValid = await parsed.verify({ publicKey: issuingCert.publicKey, signatureOnly: true });
   const issuingSignatureValid = await issuingCert.verify({ publicKey: rootCert.publicKey, signatureOnly: true });
 
-  const now = new Date();
-  const withinValidityWindow = now >= parsed.notBefore && now <= parsed.notAfter;
-  const expired = now > parsed.notAfter;
+  const withinValidityWindow = asOf >= parsed.notBefore && asOf <= parsed.notAfter;
+  const expired = asOf > parsed.notAfter;
 
   const keyUsage = parsed.getExtension(x509.KeyUsagesExtension);
   const keyUsageValid = Boolean(keyUsage && keyUsage.usages & x509.KeyUsageFlags.digitalSignature);
 
-  const revoked = cert.revoked;
+  // Revoked AS OF `asOf` — a certificate revoked only after `asOf` was not
+  // yet revoked at that moment (this is the whole point of the asOf
+  // parameter: a signature made before a later revocation stays valid
+  // when re-checked against the time it was actually made).
+  const revoked = cert.revoked && cert.revokedAt !== null && cert.revokedAt <= asOf;
 
   const valid =
     userSignatureValid && issuingSignatureValid && withinValidityWindow && keyUsageValid && !revoked;
@@ -546,8 +563,16 @@ export interface RevokedCertificateSummary {
   revokedByUserId: string | null;
 }
 
-export async function revokeCertificate(input: RevokeCertificateInput): Promise<RevokedCertificateSummary> {
-  const cert = await prisma.certificate.findUnique({
+// Shared by revokeCertificate() (opens its own audit write) and
+// revokeCertificateTx() (joins a transaction the caller already has open —
+// routes/transactions.ts's SUCCESSION approval, which revokes the
+// deceased's certificate atomically with the ownership change itself).
+async function revokeCertificateWith(
+  db: Pick<typeof prisma, "certificate">,
+  appendAudit: (input: Parameters<typeof appendAuditEntry>[0]) => Promise<unknown>,
+  input: RevokeCertificateInput,
+): Promise<RevokedCertificateSummary> {
+  const cert = await db.certificate.findUnique({
     where: { id: input.certificateId },
     include: { subject: { select: { name: true } } },
   });
@@ -559,14 +584,14 @@ export async function revokeCertificate(input: RevokeCertificateInput): Promise<
   }
 
   const revokedAt = new Date();
-  const updated = await prisma.certificate.update({
+  const updated = await db.certificate.update({
     where: { id: input.certificateId },
     data: { revoked: true, revokedAt, revokedReason: input.reason, revokedByUserId: input.revokedByUserId },
   });
 
   invalidateCrlCache();
 
-  await appendAuditEntry({
+  await appendAudit({
     action: "CERTIFICATE_REVOKED",
     actorUserId: input.revokedByUserId,
     entityType: "CERTIFICATE",
@@ -584,6 +609,20 @@ export async function revokeCertificate(input: RevokeCertificateInput): Promise<
     revokedReason: updated.revokedReason,
     revokedByUserId: updated.revokedByUserId,
   };
+}
+
+export function revokeCertificate(input: RevokeCertificateInput): Promise<RevokedCertificateSummary> {
+  return revokeCertificateWith(prisma, appendAuditEntry, input);
+}
+
+/** Same as revokeCertificate(), but writes through `db` (a Prisma
+ * transaction client) so the revocation commits or rolls back atomically
+ * with whatever else the caller's transaction does. */
+export function revokeCertificateTx(
+  db: Prisma.TransactionClient,
+  input: RevokeCertificateInput,
+): Promise<RevokedCertificateSummary> {
+  return revokeCertificateWith(db, (entry) => appendAuditEntryTx(db, entry), input);
 }
 
 /**

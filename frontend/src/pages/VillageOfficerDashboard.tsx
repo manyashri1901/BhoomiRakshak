@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import axios from "axios";
 import { ClipboardList } from "lucide-react";
 import { listPendingVo, prepareVoReview, submitVoReview, rejectVoReview } from "../api/transactions";
 import { ReviewQueue } from "../components/ReviewQueue";
 import { PageHeader } from "../components/ui/PageHeader";
 import { StatCard } from "../components/ui/StatCard";
+import { getErrorMessage } from "../lib/errorMessage";
 import type { TransactionWithChain } from "../types";
 
 export function VillageOfficerDashboard() {
@@ -15,11 +15,7 @@ export function VillageOfficerDashboard() {
     listPendingVo()
       .then(setTransactions)
       .catch((err) => {
-        setLoadError(
-          axios.isAxiosError(err)
-            ? (err.response?.data?.error ?? "Failed to load review queue")
-            : "Failed to load review queue",
-        );
+        setLoadError(getErrorMessage(err, "Failed to load review queue"));
       });
   }, []);
 

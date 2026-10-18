@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import axios from "axios";
 import { CheckCircle2, ShieldCheck, XCircle } from "lucide-react";
+import { getErrorMessage } from "../lib/errorMessage";
 import { getCRL, getCertificateByUserId, revokeCertificate } from "../api/certificates";
 import {
   verifyAuditChain,
@@ -61,9 +62,7 @@ export function AdminDashboard() {
     getCRL()
       .then(setCrl)
       .catch((err) => {
-        setCrlError(
-          axios.isAxiosError(err) ? (err.response?.data?.error ?? "Failed to load CRL") : "Failed to load CRL",
-        );
+        setCrlError(getErrorMessage(err, "Failed to load CRL"));
       });
   }, []);
 
@@ -113,9 +112,7 @@ export function AdminDashboard() {
       const results = await verifyAnchorsApi();
       setAnchorResults(results);
     } catch (err) {
-      setAnchorError(
-        axios.isAxiosError(err) ? (err.response?.data?.error ?? "Failed to verify anchors") : "Failed to verify anchors",
-      );
+      setAnchorError(getErrorMessage(err, "Failed to verify anchors"));
     } finally {
       setAnchorVerifying(false);
     }
@@ -142,11 +139,7 @@ export function AdminDashboard() {
       setAuditEntryCount(count);
       setAuditHead(head);
     } catch (err) {
-      setAuditError(
-        axios.isAxiosError(err)
-          ? (err.response?.data?.error ?? "Failed to verify audit chain")
-          : "Failed to verify audit chain",
-      );
+      setAuditError(getErrorMessage(err, "Failed to verify audit chain"));
     } finally {
       setAuditChecking(false);
     }
@@ -179,9 +172,7 @@ export function AdminDashboard() {
       setReason("");
       loadCrl();
     } catch (err) {
-      setFormError(
-        axios.isAxiosError(err) ? (err.response?.data?.error ?? "Revocation failed") : "Revocation failed",
-      );
+      setFormError(getErrorMessage(err, "Revocation failed"));
     } finally {
       setSubmitting(false);
     }

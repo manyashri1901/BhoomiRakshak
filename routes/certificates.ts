@@ -28,7 +28,7 @@
 
 import express from "express";
 import { prisma } from "../lib/prisma.ts";
-import { requireAuth, requireRole } from "../middleware/auth.ts";
+import { requireAuth, requireRole, requireCertifiedRole } from "../middleware/auth.ts";
 import { directoryLookupRateLimiter } from "../middleware/rateLimit.ts";
 import { appendAuditEntry } from "../lib/audit.ts";
 import {
@@ -195,7 +195,27 @@ router.get("/serial/:serial", requireAuth, directoryLookupRateLimiter, async (re
   });
 });
 
-router.post("/:id/revoke", requireAuth, requireRole("ADMIN"), async (req, res) => {
+// GET /api/certificates/me — the caller's OWN certificate serial, nothing
+// else. Backs the Certificate Lookup page's "My certificate" shortcut:
+// the serial it returns is just pre-filled into the exact same
+// GET /serial/:serial + client-side verification flow every other serial
+// already goes through — this endpoint itself never computes or returns
+// a verdict. Declared before the generic /:userId catch-all below (see
+// this file's header comment on route order) and rate-limited the same
+// as every other per-identity lookup here.
+router.get("/me", requireAuth, directoryLookupRateLimiter, async (req, res) => {
+  const cert = await prisma.certificate.findUnique({
+    where: { subjectUserId: req.user!.userId },
+    select: { serialNumber: true },
+  });
+  if (!cert) {
+    res.status(404).json({ error: "No certificate found for this account" });
+    return;
+  }
+  res.json({ serialNumber: cert.serialNumber });
+});
+
+router.post("/:id/revoke", requireAuth, requireCertifiedRole("ADMIN"), async (req, res) => {
   const { reason } = req.body ?? {};
   if (typeof reason !== "string" || !reason.trim()) {
     res.status(400).json({ error: "reason is required to revoke a certificate" });
@@ -223,7 +243,7 @@ router.post("/:id/revoke", requireAuth, requireRole("ADMIN"), async (req, res) =
   }
 });
 
-router.get("/:userId", requireAuth, async (req, res) => {
+router.get("/:userId", requireAuth, directoryLookupRateLimiter, async (req, res) => {
   // select, not include: true — only .name is used below; the full User
   // row carries passwordHash and wrapped key material.
   const certificate = await prisma.certificate.findUnique({

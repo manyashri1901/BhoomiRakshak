@@ -1,6 +1,7 @@
 import { api } from "./client";
 import type {
   AutoRejectResult,
+  MyTransaction,
   TransactionActionResult,
   TransactionType,
   TransactionVerifyResult,
@@ -20,6 +21,10 @@ export interface CreateTransactionInput {
   toOwnerId?: string;
   documentPath: string;
   documentHash: string;
+  // SUCCESSION's optional heir/legal document, alongside the required
+  // death certificate (documentPath/documentHash above).
+  secondaryDocumentPath?: string;
+  secondaryDocumentHash?: string;
 }
 
 export function prepareCreateTransaction(input: CreateTransactionInput) {
@@ -30,6 +35,13 @@ export function submitCreateTransaction(nonce: string, signatureValue: string) {
   return api
     .post<TransactionActionResult>("/transactions/submit", { nonce, signatureValue })
     .then((r) => r.data);
+}
+
+/** Every transaction where the caller is the buyer or the seller, however
+ * ownership currently stands — backs transfer-status visibility on both
+ * the buyer's and seller's dashboards. */
+export function getMyTransactions() {
+  return api.get<MyTransaction[]>("/transactions/mine").then((r) => r.data);
 }
 
 export function listPendingVo() {

@@ -24,6 +24,20 @@ import {
 import { canonicalStringify } from "../frontend/src/lib/canonicalize.ts";
 import { prisma } from "../lib/prisma.ts";
 
+// No hardcoded fallback credentials — this repo is public. Both must be
+// set explicitly, matching a real ADMIN account on whatever database the
+// running server is connected to (needed for the revoked-certificate
+// rejection check further down).
+if (!process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD) {
+  console.error(
+    "Refusing to run: ADMIN_EMAIL and ADMIN_PASSWORD env vars must both be set, matching an " +
+      "existing ADMIN account (this script logs in as that admin to revoke a certificate mid-flow).",
+  );
+  process.exit(1);
+}
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
 const BASE = "http://localhost:4000/api";
 const PASSWORD = "testpass123!";
 
@@ -282,7 +296,7 @@ async function main() {
   const adminLoginRes = await fetch(`${BASE}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email: "shrimanya2@gmail.com", password: "AdminPass123!" }),
+    body: JSON.stringify({ email: ADMIN_EMAIL, password: ADMIN_PASSWORD }),
   });
   const adminLoginBody = await adminLoginRes.json();
   const adminToken = adminLoginBody.token;

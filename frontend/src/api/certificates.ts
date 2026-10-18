@@ -6,6 +6,12 @@ export function getCertificateByUserId(userId: string) {
   return api.get<Certificate>(`/certificates/${userId}`).then((r) => r.data);
 }
 
+/** The caller's own certificate serial — nothing else. Backs the
+ * Certificate Lookup page's "My certificate" shortcut. */
+export function getMyCertificateSerial() {
+  return api.get<{ serialNumber: string }>("/certificates/me").then((r) => r.data.serialNumber);
+}
+
 export function getCRL() {
   return api.get<RevokedCertificateSummary[]>("/certificates/crl").then((r) => r.data);
 }

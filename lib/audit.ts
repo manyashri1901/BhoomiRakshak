@@ -259,6 +259,51 @@ export async function verifyAuditChain(): Promise<AuditVerificationResult> {
   return { valid: true, checked, firstBrokenSeq: null, reason: null };
 }
 
+// Maps a Signature's role to the audit action routes/transactions.ts
+// writes, in the SAME database transaction, at the moment that signature
+// is accepted (TRANSACTION_CREATED for the Landowner/heir's own creation
+// signature; VO_REVIEW/REGISTRAR_REVIEW with decision APPROVE for the two
+// review stages — a signature row only ever exists on the approve path,
+// never reject, so this is always a 1:1 match).
+const SIGNATURE_ROLE_TO_AUDIT_ACTION: Record<string, string> = {
+  LANDOWNER: "TRANSACTION_CREATED",
+  VILLAGE_OFFICER: "VO_REVIEW",
+  REGISTRAR: "REGISTRAR_REVIEW",
+};
+
+/**
+ * The trusted "this signature was accepted at ___" timestamp, for
+ * re-verifying a certificate's validity AS OF the moment it actually
+ * signed something (lib/ca.ts's verifyCertificate(asOf)), rather than as
+ * of right now. Deliberately NOT `Signature.signedAt` — that column is
+ * load-bearing for a different purpose entirely (reconstructing the exact
+ * bytes a review-stage signature signed; see routes/transactions.ts's
+ * buildReviewPayload) and, more importantly, is not independently
+ * tamper-evident the way this chain is: a direct database edit to a
+ * Signature row's signedAt would go undetected by anything that trusted
+ * it. This instead looks up the audit entry the SAME database transaction
+ * wrote when that signature was accepted — timestamped by this server's
+ * own `new Date()` at write time (never a client-supplied value; see the
+ * module comment above), and covered by the hash chain, so a backdated or
+ * tampered value here breaks verifyAuditChain(). Returns null if no
+ * matching entry exists (e.g. a signature row inserted directly into the
+ * database, bypassing the API entirely) — callers should treat that as
+ * untrusted, not fall back to any other timestamp.
+ */
+export async function findSignatureAcceptedAt(
+  transactionId: string,
+  actorUserId: string,
+  role: string,
+): Promise<Date | null> {
+  const action = SIGNATURE_ROLE_TO_AUDIT_ACTION[role];
+  if (!action) return null;
+  const entry = await prisma.auditLog.findFirst({
+    where: { entityType: "TRANSACTION", entityId: transactionId, actorUserId, action },
+    orderBy: { seq: "asc" },
+  });
+  return entry?.timestamp ?? null;
+}
+
 export interface AuditChainHead {
   seq: number;
   hash: string;

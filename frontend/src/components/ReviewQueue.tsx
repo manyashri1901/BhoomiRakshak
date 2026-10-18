@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import axios from "axios";
 import { Download } from "lucide-react";
 import { verifyTransaction, isAutoReject, type ReviewResult, type PreparedSignature } from "../api/transactions";
 import { downloadDocument } from "../api/documents";
 import { signAndSubmit } from "../lib/signAndSubmit";
+import { getErrorMessage } from "../lib/errorMessage";
 import { useAuth } from "../context/AuthContext";
 import { Card } from "./Card";
 import { Button } from "./ui/Button";
@@ -121,9 +121,7 @@ export function ReviewQueue({
       const result = await onReject(selectedId, reason.trim());
       handleResult(result);
     } catch (err) {
-      setActionError(
-        axios.isAxiosError(err) ? (err.response?.data?.error ?? "Review failed") : "Review failed",
-      );
+      setActionError(getErrorMessage(err, "Review failed"));
     } finally {
       setBusy(false);
     }
@@ -181,16 +179,33 @@ export function ReviewQueue({
                       {selected.type} — Survey No. {selected.landRecord.surveyNumber}
                     </h3>
                     <p className="text-sm text-slate-600">{selected.landRecord.location}</p>
+                    {selected.type === "SUCCESSION" && (
+                      <p className="mt-1 text-sm font-medium text-amber-700">
+                        Heir claim — current owner presumed deceased. Verify the death certificate below.
+                      </p>
+                    )}
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => downloadDocument(selected.documentPath)}
-                    className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                  >
-                    <Download className="h-4 w-4" aria-hidden="true" />
-                    Download document
-                  </button>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => downloadDocument(selected.documentPath)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                      <Download className="h-4 w-4" aria-hidden="true" />
+                      {selected.type === "SUCCESSION" ? "Download death certificate" : "Download document"}
+                    </button>
+                    {selected.secondaryDocumentPath && (
+                      <button
+                        type="button"
+                        onClick={() => downloadDocument(selected.secondaryDocumentPath!)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                      >
+                        <Download className="h-4 w-4" aria-hidden="true" />
+                        Download heir document
+                      </button>
+                    )}
+                  </div>
 
                   {!checking && liveCheck && !liveCheck.documentIntegrity.match && (
                     <div className="mt-4">
